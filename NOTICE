@@ -1,0 +1,21 @@
+Azure Bing Assistant notice
+
+Azure Bing Assistant is an independent community project. It is not an official
+Microsoft product and is not endorsed, sponsored, or maintained by Microsoft.
+Azure, Bing, and other Microsoft product names are trademarks of their
+respective owners.
+
+Implementation provenance
+
+The project was developed from its documented functional requirements and public
+vendor documentation. Later revisions reused and adapted frontend and Microsoft
+Foundry integration code and patterns from a prior project identified by the
+repository owner.
+
+License and third-party services
+
+This project is licensed under the MIT License; see LICENSE.
+
+Dependencies retain their respective licenses. Azure, Bing, model, and other
+third-party services remain subject to their own terms and costs; the project's
+MIT License does not license those services.

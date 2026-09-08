@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="description" content="Assistente web basato su Microsoft Foundry e Grounding with Bing Search.">
+  <title>Azure Bing Assistant</title>
+  <link rel="icon" href="data:,">
+  <script>
+    (() => {
+      const requested = new URLSearchParams(window.location.search).get("scoutTheme");
+      const theme = requested === "light" || requested === "dark"
+        ? requested
+        : (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+      document.documentElement.setAttribute("data-theme", theme);
+    })();
+  </script>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main id="portal-root" class="portal-root">
+    <section class="portal-card" aria-labelledby="portal-title">
+      <div class="portal-brand">
+        <span class="brand-mark" aria-hidden="true">AI</span>
+        <div>
+          <p id="portal-product" class="portal-product">Azure Bing Assistant</p>
+          <p id="portal-organization" class="portal-organization" hidden></p>
+        </div>
+      </div>
+
+      <div class="portal-copy">
+        <p id="portal-mode-label" class="mode-badge">Caricamento configurazione</p>
+        <h1 id="portal-title">Come posso aiutarti?</h1>
+        <p id="portal-summary" class="portal-summary">
+          Verifica delle funzionalità disponibili della chat.
+        </p>
+        <p
+          id="portal-config-status"
+          class="config-status"
+          data-state="loading"
+          role="status"
+          aria-live="polite"
+        >Caricamento della configurazione dell'assistente.</p>
+        <button id="primary-open-btn" class="primary-open" type="button">
+          <span id="primary-open-label">Inizia una conversazione</span>
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M5 12h14m-5-5 5 5-5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+
+      <aside class="capability-card" aria-labelledby="capability-title">
+        <p id="capability-kicker" class="capability-kicker">Stato della configurazione</p>
+        <h2 id="capability-title">Verifica della disponibilità della chat</h2>
+        <p id="capability-description">
+          Caricamento della configurazione dell'assistente.
+        </p>
+        <div class="capability-divider"></div>
+        <p id="document-capability" class="document-capability">
+          La disponibilità del web e dei documenti verrà mostrata dopo il caricamento.
+        </p>
+      </aside>
+    </section>
+
+    <button
+      id="launcher"
+      class="bubble-launcher"
+      type="button"
+      aria-label="Apri Azure Bing Assistant"
+      aria-haspopup="dialog"
+      title="Apri assistente"
+    >
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
+        <path d="M4 4h16v11H8l-4 4V4z" fill="currentColor"/>
+      </svg>
+      <span id="launcher-label">Chiedi all'assistente</span>
+    </button>
+  </main>
+
+  <dialog
+    id="chat-dialog"
+    class="chat-dialog"
+    aria-labelledby="dialog-title"
+    aria-describedby="ai-disclosure"
+    tabindex="-1"
+  >
+    <section class="chat-container">
+      <header class="chat-titlebar">
+        <div class="chat-titlebar-left">
+          <span class="chat-avatar" aria-hidden="true">AI</span>
+          <div class="chat-heading">
+            <h1 id="dialog-title" class="chat-title">Assistente</h1>
+            <p id="knowledge-mode-hint" class="chat-subtitle">Caricamento configurazione</p>
+          </div>
+        </div>
+        <div class="chat-actions">
+          <button id="clear-btn" class="new-conversation" type="button" hidden>
+            Nuova chat
+          </button>
+          <button
+            id="close-btn"
+            class="bubble-close"
+            type="button"
+            aria-label="Chiudi assistente"
+            title="Chiudi (Esc)"
+          >×</button>
+        </div>
+      </header>
+
+      <p id="ai-disclosure" class="ai-disclosure" role="note">
+        <span class="info-mark" aria-hidden="true">i</span>
+        <span id="disclosure-text">Questo assistente usa l'AI. Verifica le informazioni importanti e non condividere dati sensibili.</span>
+      </p>
+      <p
+        id="dialog-config-status"
+        class="dialog-config-status"
+        data-state="loading"
+        role="status"
+        aria-live="polite"
+      >Caricamento della configurazione dell'assistente.</p>
+
+      <div class="chat-stage">
+        <div id="welcome-state" class="empty-state">
+          <span class="empty-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <path d="M4 4h16v11H8l-4 4V4z" fill="currentColor"/>
+            </svg>
+          </span>
+          <p id="welcome-mode-label" class="mode-badge">Caricamento configurazione</p>
+          <h2 id="welcome-title" class="empty-title">Come posso aiutarti?</h2>
+          <p id="welcome-subtitle" class="empty-text">
+            Caricamento della configurazione dell'assistente.
+          </p>
+          <p id="welcome-mode-description" class="mode-description">
+            La disponibilità del web e dei documenti non è ancora stata confermata.
+          </p>
+          <ul id="suggested-questions" class="suggestions"></ul>
+        </div>
+
+        <div id="conversation-container" class="conversation-container">
+          <div
+            id="conversation"
+            class="chat-log"
+            role="log"
+            aria-live="polite"
+            aria-label="Cronologia della conversazione"
+          ></div>
+        </div>
+      </div>
+
+      <div id="status-area" class="status-area" role="status" aria-live="polite" aria-atomic="true"></div>
+
+      <div class="composer">
+        <form id="chat-form" class="composer-bar">
+          <label id="message-label" class="visually-hidden" for="message">Messaggio</label>
+          <textarea
+            id="message"
+            class="composer-input"
+            rows="1"
+            maxlength="8000"
+            required
+            spellcheck="true"
+            placeholder="Scrivi un messaggio…"
+            aria-describedby="composer-hint char-counter"
+          ></textarea>
+          <span id="char-counter" class="char-counter">
+            <span id="char-count">0</span> / 8000
+          </span>
+          <button id="send-btn" type="submit" class="composer-send" aria-label="Invia messaggio">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M12 4v16m0-16-6 6m6-6 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </form>
+        <p id="composer-hint" class="composer-hint">
+          Invio per inviare · Maiusc+Invio per andare a capo
+        </p>
+      </div>
+    </section>
+  </dialog>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

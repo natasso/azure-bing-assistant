@@ -1,0 +1,12 @@
+name: azure-bing-assistant
+metadata:
+  template: azure-bing-assistant@0.1.0
+infra:
+  provider: bicep
+  path: infra
+  module: main
+services:
+  web:
+    project: .
+    language: py
+    host: appservice

@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800" role="img" aria-labelledby="title desc">
+<title id="title">Architettura — Azure Bing Assistant</title>
+<desc id="desc">Percorso base con Bing; ricerca documentale amministrata opzionale.</desc>
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#374151"/></marker>
+<style>text{font-family:"Segoe UI",Arial,sans-serif;fill:#111827}.title{font-size:28px;font-weight:700}.subtitle{font-size:15px;fill:#4b5563}.group{font-size:15px;font-weight:700}.node-title{font-size:17px;font-weight:700}.body{font-size:14px}.small{font-size:12px;fill:#374151}.label{font-size:12px;font-weight:600}.arrow{fill:none;stroke:#374151;stroke-width:2.2;marker-end:url(#arrow)}.bidirectional{marker-start:url(#arrow)}.optional{stroke-dasharray:8 6}</style>
+</defs>
+<rect width="1200" height="800" fill="#fffdfc"/>
+<text class="title" x="40" y="43">Architettura — Azure Bing Assistant</text>
+<text class="subtitle" x="40" y="70">Percorso base con Bing; ricerca documentale amministrata opzionale.</text>
+<rect x="255" y="105" width="905" height="640" rx="18" fill="none" stroke="#1864ab" stroke-width="2"/>
+<rect x="271" y="93" width="240" height="25" rx="8" fill="#fffdfc"/>
+<text class="group" x="283" y="111">Confine delle risorse Azure</text>
+<rect x="35" y="160" width="185" height="125" rx="14" fill="#fce7ed" stroke="#b11f4b" stroke-width="2"/>
+<text class="node-title" x="53" y="190">Browser visitatore</text>
+<text class="body" x="53" y="217">HTML / CSS / JS</text>
+<text class="body" x="53" y="239">Chat e citazioni</text>
+<rect x="300" y="155" width="245" height="150" rx="14" fill="#dbeafe" stroke="#1864ab" stroke-width="2"/>
+<text class="node-title" x="318" y="185">Azure App Service</text>
+<text class="body" x="318" y="212">Frontend statico</text>
+<text class="body" x="318" y="234">FastAPI: config + chat</text>
+<text class="body" x="318" y="256">Identità gestita</text>
+<rect x="610" y="125" width="500" height="205" rx="18" fill="none" stroke="#2f7d4a" stroke-width="2"/>
+<rect x="626" y="113" width="152" height="25" rx="8" fill="#fffdfc"/>
+<text class="group" x="638" y="131">Azure AI Foundry</text>
+<rect x="640" y="170" width="210" height="120" rx="14" fill="#dcfce7" stroke="#2f7d4a" stroke-width="2"/>
+<text class="node-title" x="658" y="200">Progetto + agente</text>
+<text class="body" x="658" y="227">Seleziona gli strumenti</text>
+<text class="body" x="658" y="249">Restituisce evidenze</text>
+<rect x="885" y="170" width="190" height="120" rx="14" fill="#dcfce7" stroke="#2f7d4a" stroke-width="2"/>
+<text class="node-title" x="903" y="200">Modello distribuito</text>
+<text class="body" x="903" y="227">Risposta generata</text>
+<rect x="790" y="375" width="320" height="155" rx="14" fill="#fef3c7" stroke="#b45309" stroke-width="2"/>
+<text class="node-title" x="808" y="405">Grounding with Bing Search</text>
+<text class="body" x="808" y="432">Risorsa e connessione Azure</text>
+<text class="body" x="808" y="454">Web pubblico</text>
+<text class="body" x="808" y="476">L’elaborazione può uscire dai confini</text>
+<text class="body" x="808" y="498">geografici/compliance Azure</text>
+<rect x="295" y="390" width="445" height="310" rx="18" fill="none" stroke="#6b3fa0" stroke-width="2" stroke-dasharray="9 7"/>
+<rect x="311" y="378" width="272" height="25" rx="8" fill="#fffdfc"/>
+<text class="group" x="323" y="396">Opzione: Azure AI Search + Blob</text>
+<rect x="325" y="445" width="165" height="105" rx="14" fill="#f3e8ff" stroke="#6b3fa0" stroke-width="2"/>
+<text class="node-title" x="343" y="475">Blob privato</text>
+<text class="body" x="343" y="502">Documenti gestiti</text>
+<text class="body" x="343" y="524">No Shared Key</text>
+<rect x="535" y="445" width="170" height="150" rx="14" fill="#f3e8ff" stroke="#6b3fa0" stroke-width="2"/>
+<text class="node-title" x="553" y="475">Azure AI Search</text>
+<text class="body" x="553" y="502">Origine dati</text>
+<text class="body" x="553" y="524">+ indicizzatore</text>
+<text class="body" x="553" y="546">Indice documenti</text>
+<text class="body" x="553" y="568">Auth locale off</text>
+<rect x="35" y="365" width="185" height="155" rx="14" fill="#f3f4f6" stroke="#4b5563" stroke-width="2"/>
+<text class="node-title" x="53" y="395">Policy di accesso</text>
+<text class="body" x="53" y="422">Definita dal cliente</text>
+<text class="body" x="53" y="444">sul sito / API</text>
+<text class="body" x="53" y="466">Non è un login incluso</text>
+<path class="arrow" d="M 220 222 L 300 222"/>
+<rect x="218" y="183" width="120" height="23" rx="6" fill="#fffdfc"/>
+<text class="label" x="225" y="199">HTTPS • UI + API</text>
+<path class="arrow" d="M 545 222 L 640 222"/>
+<rect x="541" y="183" width="120" height="23" rx="6" fill="#fffdfc"/>
+<text class="label" x="548" y="199">Identità gestita</text>
+<path class="arrow" d="M 850 230 L 885 230"/>
+<path class="arrow" d="M 745 290 C 760 345, 840 340, 875 375"/>
+<rect x="748" y="320" width="120" height="23" rx="6" fill="#fffdfc"/>
+<text class="label" x="755" y="336">query / evidenze</text>
+<path class="arrow" d="M 490 520 L 535 520"/>
+<path class="arrow optional bidirectional" d="M 705 485 C 750 420, 705 340, 700 290"/>
+<rect x="535" y="350" width="175" height="23" rx="6" fill="#fffdfc"/>
+<text class="label" x="542" y="366">MI • query + risultati</text>
+<text class="small" x="325" y="625">La modalità off disattiva solo la ricerca documentale;</text>
+<text class="small" x="325" y="645">Bing resta disponibile.</text>
+<text class="small" x="325" y="667">Search configurato non garantisce documenti indicizzati</text>
+<text class="small" x="325" y="687">né l’uso di ogni strumento.</text>
+<text class="small" x="790" y="560">Il browser non legge Blob o Search direttamente.</text>
+<text class="small" x="35" y="554">Nessun upload nella chat.</text>
+<line x1="835" y1="710" x2="885" y2="710" stroke="#374151" stroke-width="2.2"/>
+<text class="small" x="895" y="715">Base</text>
+<line x1="980" y1="710" x2="1030" y2="710" stroke="#6b3fa0" stroke-width="2.2" stroke-dasharray="8 6"/>
+<text class="small" x="1040" y="715">Opzionale</text>
+</svg>

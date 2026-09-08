@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="850" viewBox="0 0 1200 850" role="img" aria-labelledby="title desc">
+<title id="title">Flusso operativo — Azure Bing Assistant</title>
+<desc id="desc">Scelta condizionale degli strumenti e corsia separata per l’ingestione amministrativa.</desc>
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#374151"/></marker>
+<style>text{font-family:"Segoe UI",Arial,sans-serif;fill:#111827}.title{font-size:28px;font-weight:700}.subtitle{font-size:15px;fill:#4b5563}.group{font-size:15px;font-weight:700}.node-title{font-size:17px;font-weight:700}.body{font-size:14px}.small{font-size:12px;fill:#374151}.label{font-size:12px;font-weight:600}.arrow{fill:none;stroke:#374151;stroke-width:2.2;marker-end:url(#arrow)}.optional{stroke-dasharray:8 6}</style>
+</defs>
+<rect width="1200" height="850" fill="#fffdfc"/>
+<text class="title" x="40" y="43">Flusso operativo — Azure Bing Assistant</text>
+<text class="subtitle" x="40" y="70">Scelta condizionale degli strumenti e corsia separata per l’ingestione amministrativa.</text>
+<rect x="30" y="105" width="1140" height="455" rx="18" fill="none" stroke="#1864ab" stroke-width="2"/>
+<rect x="46" y="93" width="150" height="25" rx="8" fill="#fffdfc"/>
+<text class="group" x="58" y="111">Conversazione</text>
+<rect x="60" y="165" width="180" height="120" rx="14" fill="#fce7ed" stroke="#b11f4b" stroke-width="2"/>
+<text class="node-title" x="78" y="195">Frontend</text>
+<text class="body" x="78" y="222">Messaggio</text>
+<text class="body" x="78" y="244">ID opaco precedente</text>
+<rect x="300" y="165" width="200" height="120" rx="14" fill="#dbeafe" stroke="#1864ab" stroke-width="2"/>
+<text class="node-title" x="318" y="195">FastAPI</text>
+<text class="body" x="318" y="222">Valida input</text>
+<text class="body" x="318" y="244">Inoltra a Foundry</text>
+<rect x="560" y="155" width="230" height="145" rx="14" fill="#dcfce7" stroke="#2f7d4a" stroke-width="2"/>
+<text class="node-title" x="578" y="185">Agente Foundry</text>
+<text class="body" x="578" y="212">Sceglie se / quale</text>
+<text class="body" x="578" y="234">strumento applicare</text>
+<text class="body" x="578" y="256">Non sempre grounded</text>
+<rect x="930" y="165" width="200" height="120" rx="14" fill="#dbeafe" stroke="#1864ab" stroke-width="2"/>
+<text class="node-title" x="948" y="195">Risposta API</text>
+<text class="body" x="948" y="222">Testo + citazioni fornite</text>
+<text class="body" x="948" y="244">Nuovo ID opaco</text>
+<rect x="555" y="385" width="240" height="105" rx="14" fill="#fef3c7" stroke="#b45309" stroke-width="2"/>
+<text class="node-title" x="573" y="415">Bing</text>
+<text class="body" x="573" y="442">(sempre disponibile)</text>
+<text class="body" x="573" y="464">Web pubblico esterno</text>
+<rect x="855" y="385" width="245" height="105" rx="14" fill="#f3e8ff" stroke="#6b3fa0" stroke-width="2" stroke-dasharray="8 6"/>
+<text class="node-title" x="873" y="415">Search (se configurato)</text>
+<text class="body" x="873" y="442">Solo documenti indicizzati</text>
+<path class="arrow" d="M 240 225 L 300 225"/>
+<rect x="235" y="193" width="107" height="23" rx="6" fill="#fffdfc"/>
+<text class="label" x="242" y="209">POST /api/chat</text>
+<path class="arrow" d="M 500 225 L 560 225"/>
+<path class="arrow" d="M 790 225 L 930 225"/>
+<rect x="791" y="193" width="120" height="23" rx="6" fill="#fffdfc"/>
+<text class="label" x="798" y="209">testo + evidenze</text>
+<path class="arrow" d="M 930 180 C 860 105, 250 105, 150 165"/>
+<rect x="413" y="98" width="348" height="23" rx="6" fill="#fffdfc"/>
+<text class="label" x="420" y="114">risposta; il frontend conserva solo l’ID consegnato</text>
+<path class="arrow" d="M 645 300 L 645 385"/>
+<rect x="646" y="333" width="68" height="23" rx="6" fill="#fffdfc"/>
+<text class="label" x="653" y="349">se utile</text>
+<path class="arrow optional" d="M 735 300 C 760 340, 930 340, 960 385"/>
+<rect x="773" y="321" width="192" height="23" rx="6" fill="#fffdfc"/>
+<text class="label" x="780" y="337">solo se configurato e utile</text>
+<rect x="30" y="625" width="1140" height="165" rx="18" fill="none" stroke="#6b3fa0" stroke-width="2" stroke-dasharray="9 7"/>
+<rect x="46" y="613" width="320" height="25" rx="8" fill="#fffdfc"/>
+<text class="group" x="58" y="631">Ingestione opzionale (amministratore)</text>
+<rect x="70" y="670" width="190" height="80" rx="14" fill="#f3f4f6" stroke="#4b5563" stroke-width="2"/>
+<text class="node-title" x="88" y="695">Portale admin / CLI</text>
+<text class="body" x="88" y="722">Caricamento documenti</text>
+<text class="body" x="88" y="744">fuori dalla chat</text>
+<rect x="330" y="670" width="180" height="80" rx="14" fill="#f3e8ff" stroke="#6b3fa0" stroke-width="2"/>
+<text class="node-title" x="348" y="700">Blob privato</text>
+<text class="body" x="348" y="727">Documenti</text>
+<rect x="590" y="670" width="180" height="80" rx="14" fill="#f3e8ff" stroke="#6b3fa0" stroke-width="2"/>
+<text class="node-title" x="608" y="700">Indicizzatore</text>
+<text class="body" x="608" y="727">Estrae contenuto</text>
+<rect x="850" y="670" width="220" height="80" rx="14" fill="#f3e8ff" stroke="#6b3fa0" stroke-width="2"/>
+<text class="node-title" x="868" y="700">Indice Search</text>
+<text class="body" x="868" y="727">Fonte per l’agente</text>
+<path class="arrow" d="M 260 710 L 330 710"/>
+<path class="arrow" d="M 510 710 L 590 710"/>
+<path class="arrow" d="M 770 710 L 850 710"/>
+<path class="arrow optional" d="M 960 670 L 960 490"/>
+<text class="small" x="55" y="530">Le citazioni sono mostrate solo quando Foundry le restituisce; nessuna promessa che ogni risposta usi tutti gli strumenti.</text>
+<text class="small" x="55" y="815">L’ingestione è amministrativa e separata dal percorso visitatore.</text>
+</svg>
