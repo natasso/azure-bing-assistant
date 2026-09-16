@@ -3,21 +3,120 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 from .azd import redact
 from .azure_cli import AzureCliResolutionError, azure_cli_invocation
 from .config import DEFAULT_UI_LANGUAGE, InstallerConfig
+from .installer_messages import InstallerMessages
 
 
 class ProvisioningError(RuntimeError):
     """Raised when Azure rejects or cannot confirm infrastructure deployment."""
 
+
+_DEPLOYMENT_ID = re.compile(
+    r"/subscriptions/(?P<subscription>[A-Za-z0-9-]{1,64})"
+    r"(?:/resourceGroups/(?P<group>[A-Za-z0-9_().-]{1,90}))?"
+    r"/providers/Microsoft\.Resources/deployments/(?P<name>[A-Za-z0-9_.-]{1,64})",
+    re.IGNORECASE,
+)
+_ERROR_CODE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,79}")
+_QUOTA_NUMBERS = (
+    ("Required capacity", r"\brequires? ([0-9]{1,9}) new capacity\b"),
+    ("Current usage", r"\bcurrent usage(?: of)?[ :]+([0-9]{1,9})\b"),
+    ("Current limit", r"\bcurrent limit(?: of)?[ :]+([0-9]{1,9})\b"),
+)
+
+
+def _deployment_diagnostic(resource_id: str) -> str | None:
+    match = _DEPLOYMENT_ID.fullmatch(resource_id)
+    if match is None:
+        return None
+    subscription, group, name = match.group("subscription", "group", "name")
+    scope = "group" if group else "sub"
+    command = f"az deployment operation {scope} list --subscription '{subscription}'"
+    if group:
+        command += f" --resource-group '{group}'"
+    return command + f" --name '{name}' --output json"
+
+
+class DeploymentFailedError(ProvisioningError):
+    """Bounded safe context from a terminal ARM response, not a root-cause diagnosis."""
+
+    def __init__(self, state: str, url: str, error: object) -> None:
+        self.state = state
+        self.codes: list[str] = []
+        self.numbers: list[tuple[str, str]] = []
+        self.commands: list[str] = []
+        current_id = unquote(urlsplit(url).path)
+        current = _DEPLOYMENT_ID.fullmatch(current_id)
+        command = _deployment_diagnostic(current_id)
+        if command:
+            self.commands.append(command)
+        pending = [error]
+        visited = 0
+        while pending and visited < 16:
+            node = pending.pop()
+            visited += 1
+            if not isinstance(node, Mapping):
+                continue
+            code = node.get("code")
+            if (
+                isinstance(code, str) and _ERROR_CODE.fullmatch(code)
+                and redact(code) == code and code not in self.codes
+            ):
+                self.codes.append(code)
+            # Only literal numeric quota phrases and deployment IDs survive. Never
+            # copy arbitrary provider prose, inner JSON, headers or parameters.
+            message = node.get("message")
+            message = message[:8192] if isinstance(message, str) else ""
+            if code in {"InsufficientQuota", "QuotaExceeded", "SpecialFeatureOrQuotaIdRequired"}:
+                for label, pattern in _QUOTA_NUMBERS:
+                    match = re.search(pattern, message, re.IGNORECASE)
+                    if match and (label, match[1]) not in self.numbers:
+                        self.numbers.append((label, match[1]))
+            target = node.get("target")
+            targets = [target] if isinstance(target, str) else []
+            targets.extend(
+                match[1] for match in re.finditer(
+                    r"""['"](/subscriptions/[^'"\s?#]{1,512})['"]""", message,
+                )
+            )
+            for target in targets:
+                nested = _DEPLOYMENT_ID.fullmatch(target)
+                if current and nested and (
+                    nested["subscription"].lower() == current["subscription"].lower()
+                ):
+                    command = _deployment_diagnostic(target)
+                    if command and command not in self.commands and len(self.commands) < 5:
+                        self.commands.append(command)
+            details = node.get("details")
+            if isinstance(details, list):
+                pending.extend(reversed(details[:16]))
+            inner = node.get("innererror") or node.get("innerError")
+            if isinstance(inner, Mapping):
+                pending.append(inner)
+        super().__init__(self.render("en"))
+
+    def render(self, language: str) -> str:
+        tr = InstallerMessages(language)
+        lines = [tr("Azure deployment finished with state {state}", state=self.state)]
+        if self.codes:
+            lines.append(tr("Reported error codes: {codes}", codes=" -> ".join(self.codes)))
+        lines.extend(f"{tr(label)}: {value}" for label, value in self.numbers)
+        lines.append(tr(
+            "This is limited context, not a confirmed root cause. Read the deployment "
+            "operation details with these read-only commands; no diagnostic command was executed:"
+        ))
+        lines.extend(self.commands)
+        return "\n".join(lines)
 
 _ARM_API_VERSION = "2022-09-01"
 _ARM_SCOPE = "https://management.azure.com/.default"
@@ -26,7 +125,6 @@ _DEPLOYMENT_OUTPUT_NAMES = (
     "AZURE_RESOURCE_GROUP",
     "SERVICE_WEB_NAME",
     "FOUNDRY_PROJECT_ENDPOINT",
-    "BING_CONNECTION_NAME",
     "SEARCH_ENDPOINT",
     "SEARCH_INDEX_NAME",
     "SEARCH_INDEXER_NAME",
@@ -39,7 +137,6 @@ _DEPLOYMENT_OUTPUT_NAMES = (
 _REQUIRED_DEPLOYMENT_OUTPUT_NAMES = (
     "SERVICE_WEB_NAME",
     "FOUNDRY_PROJECT_ENDPOINT",
-    "BING_CONNECTION_NAME",
 )
 _DEPLOYMENT_OUTPUT_BY_CASEFOLD = {
     name.casefold(): name for name in _DEPLOYMENT_OUTPUT_NAMES
@@ -60,6 +157,9 @@ def provision_argv(config: InstallerConfig, template_file: Path) -> list[str]:
 
 
 def _deployment_parameters(config: InstallerConfig) -> dict[str, dict[str, Any]]:
+    from .config import validate_websites
+
+    validate_websites(config.websites)
     values: dict[str, Any] = {
         "environmentName": config.environment_name,
         "resourceGroupName": config.resource_group_name or "",
@@ -184,8 +284,12 @@ class AzureArmClient:
     def __enter__(self) -> AzureArmClient:
         return self
 
-    def __exit__(self, *_args: object) -> None:
-        self.close()
+    def __exit__(self, exc_type: object, *_args: object) -> None:
+        try:
+            self.close()
+        except Exception:
+            if exc_type is None:
+                raise
 
     def close(self) -> None:
         self._transport.close()
@@ -375,9 +479,7 @@ class AzureArmClient:
             )
             if state in _TERMINAL_STATES:
                 if state != "Succeeded":
-                    raise ProvisioningError(
-                        f"Azure deployment finished with state {state}"
-                    )
+                    raise DeploymentFailedError(state, url, properties.get("error"))
                 return payload
             if payload and not isinstance(state, str):
                 raise ProvisioningError(

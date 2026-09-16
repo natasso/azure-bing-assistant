@@ -7,23 +7,34 @@ import re
 import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol, Sequence
+from urllib.parse import quote
 
 from .azure_cli import AzureCliResolutionError, azure_cli_invocation
 from .config import (
     ConfigurationError,
     InstallerConfig,
     KnowledgeMode,
+    validate_azure_name,
+    validate_identifier,
+    validate_model_capacity,
+    validate_resource_group,
     validate_ui_language,
     validate_websites,
 )
+from .installer_messages import InstallerMessageError, InstallerMessages
+from .wizard_draft import WizardDraft
 
 
-class DiscoveryError(RuntimeError):
+class DiscoveryError(InstallerMessageError, RuntimeError):
     """Raised when Azure cannot provide a required choice."""
 
 
 class CapabilityError(ConfigurationError):
     """Raised when requested enforcement is unavailable."""
+
+
+class WizardCancelled(InstallerMessageError, RuntimeError):
+    """Input ended before the operator completed the wizard."""
 
 
 @dataclass(frozen=True)
@@ -49,6 +60,30 @@ class ModelChoice:
     maximum_capacity: int | None = None
     default_capacity: int | None = None
 
+    def __post_init__(self) -> None:
+        for field in ("minimum_capacity", "maximum_capacity", "default_capacity"):
+            value = getattr(self, field)
+            if value is not None and (type(value) is not int or value < 1):
+                raise DiscoveryError(
+                    "Azure returned invalid model capacity metadata: {field} "
+                    "must be a positive integer", field=field,
+                )
+        if (
+            self.minimum_capacity is not None
+            and self.maximum_capacity is not None
+            and self.minimum_capacity > self.maximum_capacity
+        ):
+            raise DiscoveryError(
+                "Azure returned invalid model capacity metadata: minimum exceeds maximum"
+            )
+        if self.default_capacity is not None and (
+            (self.minimum_capacity is not None and self.default_capacity < self.minimum_capacity)
+            or (self.maximum_capacity is not None and self.default_capacity > self.maximum_capacity)
+        ):
+            raise DiscoveryError(
+                "Azure returned invalid model capacity metadata: default is outside the SKU range"
+            )
+
     @property
     def label(self) -> str:
         return f"{self.name} / {self.version} / {self.model_format} / {self.sku}"
@@ -64,6 +99,57 @@ class Discovery(Protocol):
     def models(self, subscription_id: str, location: str) -> list[ModelChoice]: ...
 
     def role_definition(self, subscription_id: str, accepted_names: Sequence[str]) -> str: ...
+
+
+def _capacity_guidance(
+    model: ModelChoice, displayed_capacity: int, prompts: ConsolePrompts,
+) -> None:
+    tr = prompts.messages
+    if model.default_capacity is not None:
+        prompts.output(tr("Azure SKU default: {capacity}.", capacity=model.default_capacity))
+    prompts.output(tr(
+        "Displayed capacity: {capacity}. Enter keeps it; examples never replace a valid "
+        "saved value. An Azure default is not a recommendation for your workload.",
+        capacity=displayed_capacity,
+    ))
+    if model.sku not in {"Standard", "GlobalStandard", "DataZoneStandard"}:
+        prompts.output(tr(
+            "This SKU does not use the Standard PAYG examples. Reserved/provisioned "
+            "capacity has different capacity-based charges; Batch uses different quota "
+            "semantics. Follow provider bounds and your organization's sizing and pricing "
+            "guidance; no arbitrary test/production value is recommended."
+        ))
+        return
+    prompts.output(tr(
+        "Model capacity is the initial request throughput quota, not the number of "
+        "users, guaranteed performance, or a cost budget. Azure validates quota at deployment."
+    ))
+    for units, message in (
+        (10, "Test/POC example: 10 units for a few manual queries with low concurrency."),
+        (100, "Production example: 100 units only as an illustrative starting point, not guaranteed capacity."),
+    ):
+        if (
+            (model.minimum_capacity is None or units >= model.minimum_capacity)
+            and (model.maximum_capacity is None or units <= model.maximum_capacity)
+        ):
+            prompts.output(tr(message))
+        else:
+            prompts.output(tr(
+                "The {units}-unit example is not applicable to the returned SKU range; "
+                "it is not a suggested input.", units=units,
+            ))
+    prompts.output(tr(
+        "For Standard/GlobalStandard/DataZoneStandard, capacity allocates throughput quota, "
+        "not maximum users, a monthly budget or a fixed PAYG bill. Production sizing needs "
+        "peak requests/minute, context size, model TPM/RPM ratios and limited simultaneous work."
+    ))
+    prompts.output(tr(
+        "Conditional example only: IF 1 unit = 1,000 TPM and 1 RPM, 10 requests/minute x "
+        "6,000 estimated rate-limit tokens/request require max(60, 10) = 60 units; 25% "
+        "margin gives 75, and 100 offers headroom. This is NOT a conversion for the "
+        "selected model. Rate-limit estimates differ from billed tokens; verify actual "
+        "model ratios, increments and available quota. Apply only within the returned SKU range."
+    ))
 
 
 class AzureCliDiscovery:
@@ -87,7 +173,7 @@ class AzureCliDiscovery:
                 if isinstance(exc, AzureCliResolutionError)
                 else type(exc).__name__
             )
-            raise DiscoveryError(f"Azure discovery failed: {detail}") from exc
+            raise DiscoveryError("Azure discovery failed: {detail}", detail=detail) from exc
         if completed.returncode:
             raise DiscoveryError("Azure CLI could not return the requested choices")
         try:
@@ -125,17 +211,33 @@ class AzureCliDiscovery:
         return sorted(str(row["name"]) for row in rows)
 
     def regions(self, subscription_id: str) -> list[RegionChoice]:
-        rows = self._json(
-            [
-                "az",
-                "account",
-                "list-locations",
-                "--subscription",
-                subscription_id,
-                "--output",
-                "json",
-            ]
-        )
+        try:
+            payload = self._json(
+                [
+                    "az",
+                    "rest",
+                    "--method",
+                    "get",
+                    "--subscription",
+                    subscription_id,
+                    "--url",
+                    f"/subscriptions/{quote(subscription_id, safe='')}/locations"
+                    "?api-version=2022-12-01",
+                    "--output",
+                    "json",
+                ]
+            )
+        except DiscoveryError as exc:
+            raise DiscoveryError("Azure region discovery failed: {detail}", detail=exc) from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("value"), list):
+            raise DiscoveryError(
+                "Azure returned an invalid regions response: expected a value list"
+            )
+        rows = payload["value"]
+        if any(not isinstance(row, dict) for row in rows):
+            raise DiscoveryError(
+                "Azure returned an invalid regions response: expected location objects"
+            )
         choices = [
             RegionChoice(str(row["name"]), str(row.get("displayName") or row["name"]))
             for row in rows
@@ -182,30 +284,22 @@ class AzureCliDiscovery:
                     continue
                 sku_name = sku.get("name")
                 if name and version and model_format and sku_name:
-                    capacity = sku.get("capacity") or {}
+                    capacity = sku.get("capacity")
+                    if capacity is None:
+                        capacity = {}
                     if not isinstance(capacity, dict):
-                        continue
+                        raise DiscoveryError(
+                            "Azure returned invalid model capacity metadata: expected an object"
+                        )
                     choices.append(
                         ModelChoice(
                             name,
                             version,
                             model_format,
                             sku_name,
-                            (
-                                int(capacity["minimum"])
-                                if capacity.get("minimum") is not None
-                                else None
-                            ),
-                            (
-                                int(capacity["maximum"])
-                                if capacity.get("maximum") is not None
-                                else None
-                            ),
-                            (
-                                int(capacity["default"])
-                                if capacity.get("default") is not None
-                                else None
-                            ),
+                            capacity.get("minimum"),
+                            capacity.get("maximum"),
+                            capacity.get("default"),
                         )
                     )
         if not choices:
@@ -234,8 +328,8 @@ class AzureCliDiscovery:
                 if row.get("roleName") == preferred_name and row.get("id"):
                     return str(row["id"])
         raise DiscoveryError(
-            "Azure did not return a required built-in role definition: "
-            + " or ".join(accepted_names)
+            "Azure did not return a required built-in role definition: {roles}",
+            roles=" / ".join(accepted_names),
         )
 
 
@@ -244,127 +338,494 @@ class ConsolePrompts:
         self,
         input_fn: Callable[[str], str] = input,
         output_fn: Callable[[str], None] = print,
+        language: str = "en",
     ) -> None:
         self.input = input_fn
         self.output = output_fn
+        self.messages = InstallerMessages(validate_ui_language(language))
+
+    def read(self, question: str) -> str:
+        try:
+            return self.input(question).strip()
+        except (EOFError, StopIteration, KeyboardInterrupt) as exc:
+            raise WizardCancelled(
+                self.messages("Input interrupted; installation cancelled.")
+            ) from exc
 
     def select(
         self,
         question: str,
         labels: Sequence[str],
         default_index: int | None = None,
+        bilingual: bool = False,
     ) -> int:
         if not labels:
-            raise DiscoveryError(f"No choices are available for {question}")
-        if default_index is not None and not 0 <= default_index < len(labels):
-            raise ConfigurationError("Default selection is outside the available choices")
+            raise DiscoveryError(self.messages("No choices are available for {question}", question=question))
+        if default_index is not None and (
+            type(default_index) is not int or not 0 <= default_index < len(labels)
+        ):
+            raise ConfigurationError(self.messages("Default selection is outside the available choices"))
         self.output(question)
         for index, label in enumerate(labels, start=1):
             self.output(f"  {index}. {label}")
-        prompt = (
-            f"Select a number [{default_index + 1}]: "
-            if default_index is not None
-            else "Select a number: "
+        label = "Seleziona un numero / Select a number" if bilingual else self.messages("Select a number")
+        suffix = f" [{default_index + 1}]" if default_index is not None else ""
+        hint = self.messages("Enter a number from 1 to {maximum}.", maximum=len(labels))
+        if bilingual:
+            hint = f"Inserisci un numero da 1 a {len(labels)} / Enter a number from 1 to {len(labels)}."
+        if default_index is not None:
+            hint += (
+                f" Invio / Enter = {default_index + 1}."
+                if bilingual else self.messages(" Enter = {default}.", default=default_index + 1)
+            )
+        else:
+            hint += self.messages(" Enter has no default.")
+        self.output(hint)
+        while True:
+            raw = self.read(f"{label}{suffix}: ")
+            if not raw and default_index is not None:
+                return default_index
+            try:
+                selection = int(raw) if raw.isdecimal() else 0
+            except ValueError:
+                selection = 0
+            if 1 <= selection <= len(labels):
+                return selection - 1
+            self.output(
+                "Selezione non valida / Invalid selection. " + hint
+                if bilingual else self.messages("Selection is outside the available choices") + ". " + hint
+            )
+
+    def text(
+        self,
+        question: str,
+        default: str | None = None,
+        validator: Callable[[str], object] | None = None,
+    ) -> str:
+        if default is not None:
+            default = default.strip()
+            if not default:
+                raise ConfigurationError(self.messages("Text default must not be empty"))
+            if validator is not None:
+                validator(default)
+        suffix = f" [{default}]" if default is not None else ""
+        self.output(self.messages(
+            "Press Enter to use the displayed default." if default is not None
+            else "Required; Enter has no default."
+        ))
+        while True:
+            value = self.read(f"{question}{suffix}: ")
+            if not value and default is not None:
+                value = default
+            if not value:
+                self.output(self.messages("{question} is required", question=question))
+                continue
+            try:
+                if validator is not None:
+                    validator(value)
+            except ConfigurationError as exc:
+                self.output(exc.render(self.messages.language))
+                continue
+            return value
+
+    def yes_no(self, question: str, default: bool = False) -> bool:
+        if type(default) is not bool:
+            raise ConfigurationError("Yes/no default must be a boolean")
+        suffix = (
+            ("[S/n]" if default else "[s/N]") if self.messages.language == "it"
+            else ("[Y/n]" if default else "[y/N]")
         )
-        raw = self.input(prompt).strip()
-        if not raw and default_index is not None:
-            return default_index
-        if not raw.isdigit() or not 1 <= int(raw) <= len(labels):
-            raise ConfigurationError("Selection is outside the available choices")
-        return int(raw) - 1
-
-    def text(self, question: str) -> str:
-        value = self.input(f"{question}: ").strip()
-        if not value:
-            raise ConfigurationError(f"{question} is required")
-        return value
-
-    def yes_no(self, question: str) -> bool:
-        value = self.input(f"{question} [y/N]: ").strip().lower()
-        if not value:
-            return False
-        if value not in {"y", "yes", "n", "no"}:
-            raise ConfigurationError("Answer yes or no")
-        return value in {"y", "yes"}
+        affirmative = {"y", "yes"}
+        if self.messages.language == "it":
+            affirmative |= {"s", "si", "sì"}
+        self.output(self.messages(
+            "Yes: y/yes; No: n/no; Enter = Yes." if default
+            else "Yes: y/yes; No: n/no; Enter = No."
+        ))
+        while True:
+            value = self.read(f"{question} {suffix}: ").lower()
+            if not value:
+                return default
+            if value in {"n", "no"}:
+                return False
+            if value in affirmative:
+                return True
+            self.output(self.messages("Answer yes or no"))
 
 
-_RESOURCE_GROUP = re.compile(r"^[A-Za-z0-9._()\-]{1,90}$")
+def parse_model_capacity(value: str, model: ModelChoice) -> int:
+    try:
+        if not re.fullmatch(r"[0-9]+", value):
+            raise ConfigurationError("Model capacity must be a positive integer")
+        capacity = validate_model_capacity(int(value))
+    except ValueError as exc:
+        raise ConfigurationError("Model capacity must be a positive integer") from exc
+    if (
+        (model.minimum_capacity is not None and capacity < model.minimum_capacity)
+        or (model.maximum_capacity is not None and capacity > model.maximum_capacity)
+    ):
+        raise ConfigurationError("Model capacity is outside Azure's returned SKU range")
+    return capacity
+
+
+def collect_websites(
+    prompts: ConsolePrompts, draft: WizardDraft | None = None,
+) -> tuple[str, ...]:
+    """Collect intent without ever converting a host-only request to descendants."""
+    tr = prompts.messages
+    policies: dict[str, bool] = {}
+    remembered = draft.get("domains", []) if draft is not None else []
+    more = draft.get("domain_more", False) if draft is not None else False
+    prompts.output(tr(
+        "Native search always includes subdomains. Only Yes is supported; choosing No "
+        "blocks installation without broadening your policy. Saved policies apply only "
+        "to the same domain; new domains default to No."
+        if remembered else
+        "Native search always includes subdomains. Only Yes is supported; choosing No "
+        "blocks installation without broadening your policy. No is the default."
+    ))
+    prompts.output(tr(
+        "Enter one public domain (example.org) or root HTTPS URL (https://example.org/). "
+        "At least one is required, up to 100 distinct domains; no paths, wildcards, "
+        "credentials, ports, query, fragment, or IP addresses."
+    ))
+    while True:
+        index = len(policies)
+        previous = remembered[index] if index < len(remembered) else {}
+        try:
+            raw = prompts.text(
+                tr("Authorized public domain or root HTTPS URL"),
+                default=previous.get("domain"),
+            )
+            domain = validate_websites([raw])[0]
+        except ConfigurationError as exc:
+            prompts.output(tr("Invalid domain: {reason}", reason=exc))
+            continue
+        if domain in policies:
+            policy = tr("with subdomains" if policies[domain] else "only this host")
+            prompts.output(tr(
+                "{domain} was already entered ({policy}). Enter a different domain; "
+                "cancel and restart to change its policy.",
+                domain=domain, policy=policy,
+            ))
+            continue
+        if any(rule["domain"] == domain for rule in remembered[index + 1:]):
+            prompts.output(tr("Domain {domain} is already in the remaining saved rules. Enter a different domain.", domain=domain))
+            continue
+        rule = dict(previous) if previous.get("domain") == domain else {"domain": domain}
+        if index < len(remembered):
+            remembered[index] = rule
+        else:
+            remembered.append(rule)
+            more = False
+        if draft is not None:
+            draft.update(domains=remembered, domain_more=more)
+        policies[domain] = prompts.yes_no(
+            tr("Include subdomains of {domain}?", domain=domain),
+            default=rule.get("include_subdomains", False),
+        )
+        rule["include_subdomains"] = policies[domain]
+        if draft is not None:
+            draft.update(domains=remembered)
+        if not policies[domain]:
+            prompts.output(tr(
+                "Host-only policy for {domain} is unsupported; this choice will block installation.",
+                domain=domain,
+            ))
+        if len(policies) == 100:
+            prompts.output(tr("Maximum of 100 distinct domains reached."))
+            if draft is not None:
+                draft.update(domains=remembered[:100], domain_more=False)
+            break
+        add_another = prompts.yes_no(
+            tr("Add another domain?"), default=index + 1 < len(remembered) or more,
+        )
+        if not add_another:
+            if draft is not None:
+                draft.update(domains=remembered[:index + 1], domain_more=False)
+            break
+        if draft is not None and index + 1 == len(remembered):
+            draft.update(domain_more=True)
+    prompts.output(tr("Requested domain policies:"))
+    for domain, include_subdomains in policies.items():
+        policy = tr("with subdomains" if include_subdomains else "only this host")
+        prompts.output(f"  {domain}: {policy}")
+    unsupported = [domain for domain, include in policies.items() if not include]
+    if unsupported:
+        raise CapabilityError(tr(
+            "Unsupported host-only policies: {domains}. Native web_search.filters.allowed_domains "
+            "always includes descendants and cannot honor these choices. Installation stopped "
+            "before terms or provisioning; no resources were created by this installer.",
+            domains=", ".join(unsupported),
+        ))
+    prompts.output(tr(
+        "Native Bing-backed web_search is restricted to these domains, including all their "
+        "subdomains; a subdomain does not authorize its parent. Model/region acceptance and "
+        "source metadata require manual live verification."
+    ))
+    return tuple(policies)
 
 
 def run_wizard(
     discovery: Discovery,
     prompts: ConsolePrompts,
     ui_language: str | None = None,
+    draft: WizardDraft | None = None,
 ) -> InstallerConfig:
+    prior_language = draft.get("language", "it") if draft is not None else "it"
+    if draft is not None and draft.has_answers:
+        prompts.messages = InstallerMessages(ui_language or prior_language)
+        prompts.output(prompts.messages(
+            "Resuming local installer answers. Enter accepts displayed defaults after validation. "
+            "Bing terms and final approval always require a fresh Yes. Reset: install --reset-wizard."
+        ))
     language = (
         validate_ui_language(ui_language)
         if ui_language is not None
         else ("it", "en")[
             prompts.select(
-                "Choose the application interface language",
-                ("Italiano (default)", "English"),
-                default_index=0,
+                "Lingua del chatbot e dell'installer / Chatbot and installer language",
+                (
+                    ("Italiano (predefinito / default)", "English")
+                    if prior_language == "it"
+                    else ("Italiano", "English (predefinito / default)")
+                ),
+                default_index=("it", "en").index(prior_language),
+                bilingual=True,
             )
         ]
     )
+    prompts.messages = InstallerMessages(language)
+    if draft is not None:
+        draft.update(language=language)
+    try:
+        return _run_wizard(discovery, prompts, language, draft)
+    except (ConfigurationError, DiscoveryError) as exc:
+        raise type(exc)(exc.render(language)) from exc
+
+
+def _run_wizard(
+    discovery: Discovery, prompts: ConsolePrompts, language: str,
+    draft: WizardDraft | None = None,
+) -> InstallerConfig:
+    tr = prompts.messages
+
+    def saved(name, default=None):
+        return draft.get(name, default) if draft is not None else default
+
+    def remember(*, remove=(), **values):
+        if draft is not None:
+            draft.update(remove=remove, **values)
+
+    def changed(remove, **values):
+        invalidated = remove if any(saved(key) != value for key, value in values.items()) else ()
+        if any(saved(key) is not None for key in invalidated):
+            prompts.output(tr("Selection changed; dependent resource/model defaults were cleared."))
+        remember(remove=invalidated, **values)
+
+    def default_index(prior, choices):
+        if prior is None:
+            return None
+        if prior in choices:
+            return choices.index(prior)
+        prompts.output(tr(
+            "Saved selection is no longer available in the current discovery: {value}. Choose an available option.",
+            value=prior,
+        ))
+        return None
+
     subscriptions = discovery.subscriptions()
+    prior_subscription = (
+        (saved("tenant_id"), saved("subscription_id")) if saved("subscription_id") else None
+    )
     subscription = subscriptions[
         prompts.select(
-            "Choose a signed-in tenant and subscription",
-            [f"{item.name} (tenant {item.tenant_id})" for item in subscriptions],
+            tr("Choose a signed-in tenant and subscription"),
+            [f"{item.name} (tenant {item.tenant_id}; {item.subscription_id})" for item in subscriptions],
+            default_index=default_index(
+                prior_subscription,
+                [(item.tenant_id, item.subscription_id) for item in subscriptions],
+            ),
         )
     ]
+    changed(
+        ("resource_group", "create_group", "location", "model", "capacity",
+         "environment_name", "deployment_name"),
+        tenant_id=subscription.tenant_id, subscription_id=subscription.subscription_id,
+    )
 
     groups = discovery.resource_groups(subscription.subscription_id)
-    group_labels = ["Create a new resource group", *groups]
-    group_index = prompts.select("Choose an existing or new resource group", group_labels)
+    group_labels = [tr("Create a new resource group"), *groups]
+    prior_group = (
+        0 if saved("create_group") is True
+        else default_index(saved("resource_group"), groups)
+    )
+    if saved("create_group") is not True and prior_group is not None:
+        prior_group += 1
+    group_index = prompts.select(
+        tr("Choose an existing or new resource group"), group_labels, default_index=prior_group,
+    )
     create_group = group_index == 0
-    resource_group = prompts.text("New resource group name") if create_group else groups[group_index - 1]
-    if not _RESOURCE_GROUP.fullmatch(resource_group):
-        raise ConfigurationError("Resource group name is not valid for Azure")
+    changed(
+        ("resource_group", "environment_name", "deployment_name"),
+        create_group=create_group,
+    )
+    if create_group:
+        prompts.output(tr(
+            "Use 1-90 ASCII letters, digits, periods, underscores, parentheses or hyphens "
+            "(e.g. rg-assistant). Azure checks existence and permissions later."
+        ))
+        resource_group = prompts.text(
+            tr("New resource group name"),
+            default=saved("resource_group"),
+            validator=lambda value: validate_resource_group(value, tr("Resource group name")),
+        )
+    else:
+        resource_group = validate_resource_group(groups[group_index - 1], tr("Resource group name"))
+    changed(("environment_name", "deployment_name"), resource_group=resource_group)
 
     regions = discovery.regions(subscription.subscription_id)
     region = regions[
         prompts.select(
-            "Choose an Azure region returned for this subscription",
+            tr("Choose an Azure region returned for this subscription"),
             [f"{item.display_name} ({item.name})" for item in regions],
+            default_index=default_index(saved("location"), [item.name for item in regions]),
         )
     ]
+    changed(("model", "capacity"), location=region.name)
     models = discovery.models(subscription.subscription_id, region.name)
+    identities = [
+        {"name": item.name, "version": item.version, "format": item.model_format, "sku": item.sku}
+        for item in models
+    ]
     model = models[
         prompts.select(
-            "Choose a model, version, format, and deployment SKU returned by Azure",
+            tr("Choose a model, version, format, and deployment SKU returned by Azure"),
             [item.label for item in models],
+            default_index=default_index(saved("model"), identities),
         )
     ]
-    capacity_detail = (
-        f"{model.minimum_capacity}-{model.maximum_capacity}"
-        if model.minimum_capacity is not None and model.maximum_capacity is not None
-        else "positive integer; quota is validated by Azure at deployment"
+    changed(
+        ("capacity",),
+        model={"name": model.name, "version": model.version, "format": model.model_format, "sku": model.sku},
     )
-    capacity_text = prompts.text(f"Model capacity ({capacity_detail})")
-    if not capacity_text.isdigit():
-        raise ConfigurationError("Model capacity must be an integer")
-    model_capacity = int(capacity_text)
-    if (
-        model.minimum_capacity is not None
-        and model.maximum_capacity is not None
-        and not model.minimum_capacity <= model_capacity <= model.maximum_capacity
-    ):
-        raise ConfigurationError("Model capacity is outside Azure's returned SKU range")
+    default_capacity = model.default_capacity
+    if default_capacity is None:
+        default_capacity = InstallerConfig.model_capacity
+        if model.minimum_capacity is not None:
+            default_capacity = max(default_capacity, model.minimum_capacity)
+        if model.maximum_capacity is not None:
+            default_capacity = min(default_capacity, model.maximum_capacity)
+    if saved("capacity") is not None:
+        try:
+            default_capacity = parse_model_capacity(str(saved("capacity")), model)
+        except ConfigurationError:
+            prompts.output(tr(
+                "Saved capacity {capacity} is outside the current model/SKU bounds; offering the valid model default instead.",
+                capacity=saved("capacity"),
+            ))
+            remember(remove=("capacity",))
+    _capacity_guidance(model, default_capacity, prompts)
+    if language == "it":
+        capacity_question = "Capacità del modello"
+        minimum_label, maximum_label = "minimo", "massimo"
+        prompts.output(
+            "Premi Invio per mantenere questo valore, oppure inserisci un altro valore "
+            "(numero intero positivo)."
+        )
+    else:
+        capacity_question = "Model capacity"
+        minimum_label, maximum_label = "minimum", "maximum"
+        prompts.output(
+            "Press Enter to keep this value, or enter another value (positive integer)."
+        )
+    capacity_bounds = []
+    if model.minimum_capacity is not None:
+        capacity_bounds.append(f"{minimum_label} {model.minimum_capacity}")
+    if model.maximum_capacity is not None:
+        capacity_bounds.append(f"{maximum_label} {model.maximum_capacity}")
+    if capacity_bounds:
+        capacity_question += f" ({'; '.join(capacity_bounds)})"
+    capacity_text = prompts.text(
+        capacity_question, default=str(default_capacity),
+        validator=lambda value: parse_model_capacity(value, model),
+    )
+    model_capacity = parse_model_capacity(capacity_text, model)
+    remember(capacity=model_capacity)
 
-    chatbot_name = prompts.text("Chatbot name")
-    environment_name = prompts.text("Deployment environment identifier")
-    deployment_name = prompts.text("Model deployment name")
+    prompts.output(tr(
+        "Technical ID, not the public chat label: use 3-24 lowercase letters, digits or "
+        "hyphens, starting with a letter (e.g. assistente-demo). "
+        "Public UI labels can contain spaces and are configured separately."
+    ))
+    chatbot_name = prompts.text(
+        tr("Chatbot technical name"),
+        default=saved("chatbot_name"),
+        validator=lambda value: validate_identifier(tr("Chatbot technical name"), value),
+    )
+    remember(chatbot_name=chatbot_name)
+    if language == "it":
+        environment_question = "Nome breve dell’installazione (es. assistente-demo)"
+        prompts.output(
+            "È un nome interno per salvare la configurazione dell’installer e ricavare "
+            "i nomi delle risorse Azure."
+        )
+        prompts.output(
+            "Può essere diverso dal nome del gruppo di risorse già scelto; "
+            "non è il titolo della chat visibile ai visitatori."
+        )
+        prompts.output(
+            "Usa 3–24 caratteri: lettere minuscole, cifre o trattini, iniziando con una lettera."
+        )
+        prompts.output(
+            "Riusa questo nome per gli aggiornamenti: cambiarlo può generare "
+            "un insieme separato di risorse."
+        )
+    else:
+        environment_question = "Short installation name (e.g. assistant-demo)"
+        prompts.output(
+            "This is an internal name used to save the installer configuration and derive "
+            "Azure resource names."
+        )
+        prompts.output(
+            "It can differ from the resource-group name already chosen; "
+            "it is not the chat title visitors see."
+        )
+        prompts.output(
+            "Use 3–24 lowercase letters, digits or hyphens, starting with a letter."
+        )
+        prompts.output(
+            "Reuse this name for updates: changing it can generate a separate set of resources."
+        )
+    environment_name = prompts.text(
+        environment_question,
+        default=saved("environment_name"),
+        validator=lambda value: validate_identifier(tr("Installation name"), value),
+    )
+    remember(environment_name=environment_name)
+    prompts.output(tr(
+        "The deployment name identifies the model route on the endpoint, not the model "
+        "catalog name. Use 1-128 ASCII letters, digits, periods, underscores or hyphens, "
+        "starting with a letter or digit (e.g. chat-model)."
+    ))
+    deployment_name = prompts.text(
+        tr("Model deployment name"),
+        default=saved("deployment_name"),
+        validator=lambda value: validate_azure_name(tr("Model deployment name"), value),
+    )
+    remember(deployment_name=deployment_name)
 
-    prompts.output(
-        "Chat uses Bing web grounding by default. Document search is optional and off "
+    prompts.output(tr(
+        "Chat uses Bing web grounding by default, restricted to authorized domains. "
+        "Document search is optional and off "
         "unless you enable it."
-    )
-    use_search = prompts.yes_no(
+    ))
+    use_search = prompts.yes_no(tr(
         "Optional: add Blob storage and Azure AI Search for administrator-managed "
         "documents (adds Search and Storage costs)"
-    )
+    ), default=saved("use_search", False))
+    remember(use_search=use_search)
+    websites = collect_websites(prompts, draft)
     foundry_role_id = discovery.role_definition(
         subscription.subscription_id,
         ("Foundry User", "Azure AI User", "Cognitive Services OpenAI User"),
@@ -380,22 +841,9 @@ def run_wizard(
             subscription.subscription_id,
             ("Search Index Data Reader",),
         )
-    websites = validate_websites(
-        prompts.text("Preferred public websites/domains for Bing grounding").split(",")
-    )
-    prompts.output(
-        "Standard Grounding with Bing Search searches the public web. These sites are advisory."
-    )
-    if prompts.yes_no("Require strict enforcement of only those websites"):
-        raise CapabilityError(
-            "Current Foundry supports strict sites through either a verified Bing Custom "
-            "Search configuration or an Azure AI Search Web Knowledge Source with allowedDomains. "
-            "The latter requires Search and a separate knowledge-base integration. "
-            "This installer implements neither strict path and will not deploy advisory rules as strict"
-        )
-    if not prompts.yes_no(
+    if not prompts.yes_no(tr(
         "Accept Bing grounding cost, terms, and data flow outside Azure compliance/Geo boundaries"
-    ):
+    ), default=False):
         raise CapabilityError("Bing grounding terms and data-flow acknowledgement is required")
 
     return InstallerConfig(

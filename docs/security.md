@@ -96,8 +96,20 @@ sensibili o riservati senza una base e controlli approvati.
 
 Non committare `.env`, directory azd, token, password, chiavi, connection
 string, file parametri, ARM JSON generato, endpoint privati, documenti o export
-tenant. La chiave Bing viene risolta all'interno di ARM e scritta solo nella
-connessione Foundry gestita; non è input, output o setting applicativo.
+tenant. La ricerca nativa filtrata non richiede chiave/connessione Bing standalone.
+Il template incrementale non elimina quelle eventualmente già presenti.
+
+La policy web è applicata con `web_search.filters.allowed_domains`, non dal prompt.
+Il runtime verifica l'esatta versione agente prima dell'inferenza e i metadati di
+fonti/URL dopo. Non usa tool web alternativi in caso di errore. Evidenza esterna,
+tool non filtrati o metadati mancanti bloccano la risposta; non vengono scartate
+solo le citazioni scomode. Un link di query Bing `www.bing.com/search` non è una
+fonte esterna consultata. I controlli URL non effettuano fetch o risoluzione DNS.
+Il filtro include i sottodomini e non limita percorsi. I controlli successivi
+non possono impedire retroattivamente fetch del servizio né provare ogni
+affermazione del modello. L'enforcement live per modello/regione e `open_page`
+resta da verificare. Dopo ogni cambio di policy avviare Nuova chat: non si
+garantisce che la vecchia cronologia remota contenga solo fonti autorizzate.
 
 I setting `UI_*` sono non segreti. Identificatori di sottoscrizione, resource
 group e risorse non sono password ma possono essere dati organizzativi:
@@ -209,8 +221,19 @@ controls.
 
 Do not commit `.env`, azd directories, tokens, passwords, keys, connection
 strings, parameter files, generated ARM JSON, private endpoints, documents, or
-tenant exports. The Bing key is resolved inside ARM and written only to the
-managed Foundry connection; it is not an application input, output, or setting.
+tenant exports. Native filtered search needs no standalone Bing key/connection.
+The incremental template does not delete existing ones.
+
+Web policy uses `web_search.filters.allowed_domains`, not a prompt boundary.
+Runtime verifies the exact agent version before inference and source/URL metadata
+afterwards, never retrying with alternative broad tools. Outside evidence,
+unfiltered tools, or missing metadata block the entire answer, rather than just
+hiding inconvenient citations. A `www.bing.com/search` query link is not a consulted
+external source. URL checks perform no server fetch or DNS lookup. Filters include
+subdomains, not paths. Post-response checks cannot retroactively prevent service
+fetches or prove every model statement. Live enforcement for each model/region,
+including `open_page`, remains unverified. Start New chat after source-policy
+changes; old remote history is not guaranteed to contain only approved sources.
 
 `UI_*` settings are non-secret. Subscription, resource-group, and resource
 identifiers are not passwords but may be organizational data; share them only

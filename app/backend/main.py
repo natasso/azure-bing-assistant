@@ -18,6 +18,7 @@ from azure_bing_assistant.agent import (
     AgentResponse,
     FoundryAgentAdapter,
     InvalidPreviousResponse,
+    SourcePolicyError,
     transform_citations,
 )
 
@@ -89,6 +90,9 @@ def create_app(
             current.foundry_project_endpoint,
             current.chatbot_name,
             timeout_seconds=current.agent_timeout_seconds,
+            allowed_domains=current.allowed_domains,
+            search_enabled=current.knowledge_mode == "searchBlob",
+            document_source=current.document_source,
         )
     else:
         adapter = UnconfiguredAgent()
@@ -137,6 +141,9 @@ def create_app(
             "disclaimer": ui.disclaimer,
             "suggestedQuestions": ui.suggested_questions,
             "knowledgeMode": current.knowledge_mode,
+            "allowedDomains": list(current.allowed_domains),
+            "websiteEnforcement": "allowed_domains" if current.allowed_domains else None,
+            "includesSubdomains": True,
         })
 
     async def run_turn(payload: ChatRequest, request: Request) -> AgentResponse | None:
@@ -176,6 +183,15 @@ def create_app(
                 status_code=504,
                 content={"detail": "The cloud agent timed out."},
             )
+        except SourcePolicyError:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "detail": "Source policy could not be verified. Ask the administrator to "
+                              "reconfigure the agent and verify model/region support; start a new chat.",
+                    "code": "source_policy_unverified",
+                },
+            )
         except RuntimeError:
             return JSONResponse(
                 status_code=503,
@@ -203,6 +219,8 @@ def create_app(
             "message": result.text,
             "citations": citations,
             "previousResponseId": result.response_id,
+            "consultedSources": result.consulted_sources,
+            "webSearchUsed": result.web_search_used,
         })
 
     async def uploads_unsupported(request: Request) -> JSONResponse:

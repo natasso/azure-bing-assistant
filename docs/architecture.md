@@ -12,16 +12,14 @@
 
 [Sorgente Excalidraw del grafo](assets/architecture-it.excalidraw)
 
-Il grafo sopra è la rappresentazione di riferimento della distribuzione
-attuale. Il percorso `off` crea:
+**Grafo storico:** mostra ancora risorsa/connessione Bing standalone, ora rimosse
+dal template. Il testo seguente descrive il deployment attuale. Il percorso `off` crea:
 
 - un piano Linux Basic e un App Service HTTPS con Managed Identity
   `SystemAssigned`;
 - un account Microsoft Foundry/AI Services con autenticazione locale
   disabilitata, un progetto con Managed Identity e il deployment del modello
   scelto;
-- una risorsa Grounding with Bing Search e la relativa connessione gestita nel
-  progetto Foundry;
 - role assignment che consente all'identità del web app di usare Foundry.
 
 `searchBlob` conserva tutti questi componenti e aggiunge Storage Standard LRS,
@@ -55,7 +53,7 @@ HMAC, chiavi di firma, lease o lock distribuiti.
 3. `DefaultAzureCredential` invia una distribuzione subscription-scope
    incrementale ad Azure Resource Manager tramite HTTPS.
 4. Gli output non segreti confermati vengono salvati nell'ambiente azd.
-5. Il post-deploy crea/aggiorna la versione dell'agente, collega sempre Bing,
+5. Il post-deploy crea/verifica la versione dell'agente con `web_search.filters.allowed_domains`,
    collega Search solo in `searchBlob`, poi azd distribuisce il pacchetto web.
 
 L'identità dell'operatore serve al deployment; la Managed Identity dell'App
@@ -68,16 +66,22 @@ nell'app.
 
 [Sorgente Excalidraw del flusso](assets/flow-it.excalidraw)
 
+Il flusso illustrato precede il filtro nativo e i controlli di versione/fonti sotto.
+
 1. Il browser carica la pagina e `GET /api/config` dallo stesso FastAPI.
 2. Con `POST /api/chat` invia JSON con `message` e, dai turni successivi,
    l'eventuale `previousResponseId`.
 3. FastAPI convalida lunghezza e caratteri, poi l'adapter asincrono usa
    `AIProjectClient`, `DefaultAzureCredential` e Foundry Responses. Il browser
    non chiama mai direttamente Foundry.
-4. L'agente può usare Grounding with Bing Search; in `searchBlob` può anche
+4. Prima di ogni inferenza, `agents.get(name).versions.latest` viene verificato:
+   definizione prompt, esatta lista domini e nessun altro tool web. La stessa
+   versione immutabile viene passata in `agent_reference.version`, evitando una
+   selezione implicita di un agente precedente o di un nuovo latest non verificato.
+   L'agente può usare `web_search` filtrato; in `searchBlob` può anche
    recuperare documenti già indicizzati da Azure AI Search.
 5. FastAPI restituisce `message`, citazioni proiettate e il nuovo
-   `previousResponseId`. Il browser conserva solo l'ultimo ID in memoria e lo
+   `previousResponseId`, `consultedSources` e `webSearchUsed`. Il browser conserva solo l'ultimo ID in memoria e lo
    invia invariato al turno seguente.
 
 Ogni scheda è indipendente. “New chat” cancella l'ID locale. Cancel annulla la
@@ -112,14 +116,24 @@ configurata, non che un documento sia stato caricato, indicizzato o recuperato.
 
 ### Confini del grounding web
 
-Questa implementazione usa il `BingGroundingTool` standard sul web pubblico.
-I siti preferiti diventano istruzioni consultive, non limiti. Non usa la vecchia
-API Bing Web Search standalone e non accetta `BING_SEARCH_KEY`.
+Questa implementazione usa i modelli SDK ufficiali `WebSearchTool` e
+`WebSearchToolFilters(allowed_domains=[...])` in `PromptAgentDefinition.tools`.
+L'SDK installato `azure-ai-projects==2.0.1` crea versioni con **POST**
+`/agents/{name}/versions` (non un PUT ipotizzato). La serializzazione HTTP reale
+è testata offline. Nessuna proprietà inventata, tool preview o fallback senza
+filtro; nessuna connessione/chiave Bing standalone o nuova architettura Search richiesta.
+I filtri includono sottodomini, non percorsi; non inferiscono equivalenza www/apice.
 
-Un filtro rigoroso richiederebbe un Bing Custom Search pubblicato e verificato
-oppure l'architettura distinta Azure AI Search/Foundry IQ Web Knowledge Source
-con `allowedDomains` e knowledge base. Nessuna delle due viene creata qui;
-`--strict-websites` fallisce invece di simulare l'applicazione della regola.
+Responses richiede `include=["web_search_call.action.sources"]`; il backend
+verifica tool restituiti, fonti consultate, URL open/find e citazioni. Rifiuta
+l'intera risposta se mancano metadati attesi o appare evidenza fuori dominio.
+Un saluto senza retrieval resta possibile, senza rivendicare grounding.
+I controlli non possono annullare un fetch già avvenuto né provare ogni affermazione.
+Supporto ed enforcement live per il modello/regione, incluso `open_page`, restano
+da verificare manualmente. Dopo cambi di policy serve una nuova conversazione.
+
+Il reprovisioning incrementale non elimina risorse/connessioni Bing precedenti.
+Il cliente le valuta separatamente. Consumo Bing, termini e confini dati restano applicabili.
 
 ### Esclusioni e limiti
 
@@ -128,7 +142,7 @@ ingestione siti, NFS, source picker, telemetria applicativa, archivio
 conversazioni, gateway, WAF, CAPTCHA o rate limiter. Endpoint privati, DNS,
 protezione ingresso, diagnostica e retention dipendono dal cliente.
 
-Il progetto usa un'API di progetto Foundry preview e deve essere verificato nel
+Il progetto usa l'API data-plane Foundry `v1` dell'SDK installato e deve essere verificato nel
 tenant/area scelti. Grounding with Bing può elaborare query, parametri e
 credenziali di servizio fuori dai confini geografici/compliance Azure; il DPA
 Microsoft non si applica a tale elaborazione Bing. Non vengono offerte garanzie
@@ -139,6 +153,8 @@ di conformità o residenza.
 Riferimenti controllati indipendentemente il 25 agosto 2026:
 
 - [Web grounding overview](https://learn.microsoft.com/azure/foundry/agents/how-to/tools/web-overview)
+- [Azure Responses domain filtering and consulted sources](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/web-search#domain-filtering)
+- [Foundry v1 OpenAPI](https://github.com/Azure/azure-rest-api-specs/blob/main/specification/ai-foundry/data-plane/Foundry/openapi3/v1/microsoft-foundry-openapi3.json)
 - [Grounding with Bing tools](https://learn.microsoft.com/azure/foundry/agents/how-to/tools/bing-tools)
 - [Web Search and domain-restricted Custom Search](https://learn.microsoft.com/azure/foundry/agents/how-to/tools/web-search)
 - [Foundry toolbox supported-tools matrix](https://learn.microsoft.com/azure/foundry/agents/concepts/toolbox-overview#supported-tools)
@@ -158,14 +174,14 @@ Riferimenti controllati indipendentemente il 25 agosto 2026:
 
 [Excalidraw source for the graph](assets/architecture-en.excalidraw)
 
-The graph above is the reference representation of the current deployment. The
-`off` path creates:
+**Historical graph:** it still shows the standalone Bing resource/connection,
+now removed from the template. The following text describes the current deployment.
+The `off` path creates:
 
 - a Linux Basic plan and HTTPS App Service with `SystemAssigned` Managed
   Identity;
 - a Microsoft Foundry/AI Services account with local authentication disabled,
   a project with Managed Identity, and the selected model deployment;
-- a Grounding with Bing Search resource and managed Foundry project connection;
 - a role assignment allowing the web app identity to use Foundry.
 
 `searchBlob` keeps all those components and adds Standard LRS Storage, a private
@@ -198,7 +214,7 @@ signing key, lease, or distributed lock.
 3. `DefaultAzureCredential` sends an incremental subscription-scope deployment
    to Azure Resource Manager over HTTPS.
 4. Confirmed non-secret outputs are stored in the azd environment.
-5. Post-deploy creates/updates the agent version, always attaches Bing, attaches
+5. Post-deploy creates/verifies the agent version with `web_search.filters.allowed_domains`, attaches
    Search only in `searchBlob`, and then azd deploys the web package.
 
 Operator identity is used for deployment; App Service Managed Identity is used
@@ -210,16 +226,21 @@ at runtime. Operator credentials are never deployed into the app.
 
 [Excalidraw source for the flow](assets/flow-en.excalidraw)
 
+This illustration predates native filtering and the version/source checks below.
+
 1. The browser loads the page and `GET /api/config` from the same FastAPI app.
 2. `POST /api/chat` sends JSON containing `message` and, after the first turn,
    optional `previousResponseId`.
 3. FastAPI validates length and characters. The asynchronous adapter then uses
    `AIProjectClient`, `DefaultAzureCredential`, and Foundry Responses. The
    browser never calls Foundry directly.
-4. The agent may use Grounding with Bing Search; in `searchBlob`, it may also
+4. Before each inference, `agents.get(name).versions.latest` is verified: prompt
+   definition, exact allowed domains, and no other web tool. That immutable version
+   is pinned in `agent_reference.version`, avoiding an old broad agent or a later
+   unverified latest version. The agent may use filtered `web_search`; in `searchBlob`, it may also
    retrieve documents already indexed by Azure AI Search.
 5. FastAPI returns `message`, projected citations, and the next
-   `previousResponseId`. The browser keeps only the latest ID in memory and
+   `previousResponseId`, `consultedSources`, and `webSearchUsed`. The browser keeps only the latest ID in memory and
    passes it unchanged on the following turn.
 
 Each tab is independent. “New chat” clears its local ID. Cancel aborts the
@@ -252,14 +273,23 @@ document was uploaded, indexed, or retrieved.
 
 ### Web-grounding boundary
 
-This implementation uses standard `BingGroundingTool` against the public web.
-Preferred sites become advisory instructions, not restrictions. It does not use
-the retired standalone Bing Web Search API and accepts no `BING_SEARCH_KEY`.
+This implementation uses official SDK `WebSearchTool` and
+`WebSearchToolFilters(allowed_domains=[...])` in `PromptAgentDefinition.tools`.
+Installed `azure-ai-projects==2.0.1` creates versions with **POST**
+`/agents/{name}/versions`, not an assumed PUT. The actual SDK HTTP serialization
+is tested offline. There are no invented fields, preview tools, unfiltered
+fallbacks, standalone Bing keys/connections, or required new Search architecture.
+Domains include subdomains, not paths, without inferring www/apex equivalence.
 
-Strict filtering would require a published, verified Bing Custom Search or the
-distinct Azure AI Search/Foundry IQ Web Knowledge Source architecture with
-`allowedDomains` and a knowledge base. Neither is created here;
-`--strict-websites` fails rather than simulating enforcement.
+Responses requests `include=["web_search_call.action.sources"]`. Runtime validates
+returned tools, consulted sources, open/find URLs, and citations. Missing expected
+metadata or outside-domain evidence rejects the entire answer. A greeting without
+retrieval remains possible without claiming grounding. Checks cannot undo a service
+fetch or prove every statement. Live model/region support and enforcement, including
+`open_page`, require manual verification. Source-policy changes require a new chat.
+
+Incremental reprovisioning does not delete older Bing resources/connections.
+Customers review them separately. Bing consumption, terms and data boundaries still apply.
 
 ### Exclusions and limitations
 
@@ -268,7 +298,7 @@ ingestion, NFS, source picker, application telemetry, conversation store,
 gateway, WAF, CAPTCHA, or rate limiter. Private endpoints, DNS, ingress
 protection, diagnostics, and retention are customer-specific.
 
-The project uses a preview Foundry project API and requires verification in the
+The project uses the installed SDK's Foundry `v1` data-plane API and requires verification in the
 selected tenant/region. Grounding with Bing may process queries, parameters, and
 service credentials outside Azure compliance/geographic boundaries; the
 Microsoft DPA does not apply to that Bing processing. No compliance or
@@ -279,6 +309,8 @@ residency guarantee is provided.
 References independently checked on August 25, 2026:
 
 - [Web grounding overview](https://learn.microsoft.com/azure/foundry/agents/how-to/tools/web-overview)
+- [Azure Responses domain filtering and consulted sources](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/web-search#domain-filtering)
+- [Foundry v1 OpenAPI](https://github.com/Azure/azure-rest-api-specs/blob/main/specification/ai-foundry/data-plane/Foundry/openapi3/v1/microsoft-foundry-openapi3.json)
 - [Grounding with Bing tools](https://learn.microsoft.com/azure/foundry/agents/how-to/tools/bing-tools)
 - [Web Search and domain-restricted Custom Search](https://learn.microsoft.com/azure/foundry/agents/how-to/tools/web-search)
 - [Foundry toolbox supported-tools matrix](https://learn.microsoft.com/azure/foundry/agents/concepts/toolbox-overview#supported-tools)

@@ -10,6 +10,7 @@ import pytest
 
 from azure_bing_assistant import cli
 from azure_bing_assistant.provision import _canonical_deployment_outputs
+from azure_bing_assistant.wizard import ConsolePrompts, ModelChoice, RegionChoice, SubscriptionChoice
 
 
 def test_cli_uses_renamed_command():
@@ -17,6 +18,362 @@ def test_cli_uses_renamed_command():
 
     assert parser.prog == "azure-bing-assistant"
     assert "Azure Bing Assistant" in parser.description
+
+
+@pytest.mark.parametrize("language", ["it", "en"])
+@pytest.mark.parametrize("failure_phase", [None, 2, 3, 4, 5])
+def test_install_progress_tracks_real_boundaries_and_keeps_stdout_json(
+    monkeypatch, tmp_path, capsys, language, failure_phase,
+):
+    import io
+    from azure_bing_assistant.install_progress import InstallProgress
+
+    monkeypatch.chdir(tmp_path)
+    stream = io.StringIO()
+    displays = []
+    operations = []
+    values = {
+        "AZURE_SUBSCRIPTION_ID": "example-sub", "AZURE_RESOURCE_GROUP": "rg-demo",
+        "SERVICE_WEB_NAME": "app-demo",
+        "FOUNDRY_PROJECT_ENDPOINT": "https://example.services.ai.azure.com/api/projects/demo",
+        "MODEL_DEPLOYMENT_NAME": "chat-model", "KNOWLEDGE_MODE": "off",
+    }
+
+    def display(*args):
+        progress = InstallProgress(*args, stream=stream)
+        displays.append(progress)
+        return progress
+
+    def observe(expected, name):
+        assert len(displays) == expected
+        assert displays[-1].thread.is_alive()
+        assert not displays[-1].stop.is_set()
+        assert ("in corso" if language == "it" else "in progress") in stream.getvalue().splitlines()[-1]
+        operations.append(name)
+        if failure_phase == expected:
+            if expected == 2:
+                raise cli.DeploymentFailedError(
+                    "Failed",
+                    "https://management.azure.com/subscriptions/example-sub/providers/Microsoft.Resources/deployments/chatbot-demo",
+                    {"code": "ResourceDeploymentFailure", "message": "api-key=PRIVATE"},
+                )
+            raise cli.AzdError("synthetic failure")
+
+    class Runner:
+        def ensure_environment(self, _):
+            observe(1, "ensure")
+
+        def run(self, argv):
+            if argv[:3] == ["azd", "deploy", "web"]:
+                observe(5, "package")
+            else:
+                observe(len(displays), "save")
+                values[argv[3]] = argv[4]
+
+        def get_environment_values(self, _):
+            observe(3, "read confirmed")
+            return values
+
+    def provision(_config):
+        observe(2, "ARM confirmed")
+        return dict(values)
+
+    monkeypatch.setattr(cli, "InstallProgress", display)
+    monkeypatch.setattr(cli, "AzdRunner", lambda _: Runner())
+    monkeypatch.setattr(cli, "AzureProvisioner", lambda _: SimpleNamespace(run=provision))
+    monkeypatch.setattr(cli, "_configure_post_deploy", lambda _: observe(4, "Foundry"))
+    monkeypatch.setattr(cli, "_sync_app_service_settings", lambda *_: observe(4, "runtime"))
+    monkeypatch.setattr(cli.subprocess, "run", Mock(side_effect=AssertionError("No live commands")))
+    result = cli.main([
+        "install", "--non-interactive", "--ui-language", language, "--mode", "off",
+        "--environment", "demo", "--subscription", "example-sub", "--resource-group", "rg-demo",
+        "--location", "westeurope", "--model-name", "example-model", "--model-version", "1",
+        "--model-format", "OpenAI", "--model-sku", "DataZoneStandard", "--model-capacity", "1000",
+        "--deployment-name", "chat-model", "--chatbot-name", "helper", "--websites", "example.org",
+        "--accept-bing-terms", "--foundry-user-role-id",
+        "/subscriptions/example-sub/providers/Microsoft.Authorization/roleDefinitions/example-role",
+    ])
+    captured = capsys.readouterr()
+    if failure_phase is None:
+        assert result == 0 and json.loads(captured.out)["status"] == "succeeded"
+        assert operations.index("ARM confirmed") < operations.index("read confirmed") < operations.index("Foundry") < operations.index("runtime") < operations.index("package")
+        assert len(displays) == 5
+    else:
+        assert result == 2 and captured.out == ""
+        assert len(displays) == failure_phase
+        assert ("non riuscita" if language == "it" else "failed") in stream.getvalue().splitlines()[-1]
+        if failure_phase == 2:
+            assert "ResourceDeploymentFailure" in captured.err and "--name 'chatbot-demo'" in captured.err
+            assert "PRIVATE" not in captured.err
+    assert values["MODEL_CAPACITY"] == "1000"
+    assert not (tmp_path / ".azure").exists()
+    assert all(not progress.thread.is_alive() for progress in displays)
+    text = stream.getvalue()
+    assert "%" not in text and "\r" not in text and "\x1b" not in text
+    assert len(text.splitlines()) == 2 * len(displays)
+
+
+@pytest.fixture
+def interactive_install(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    discovery = SimpleNamespace(
+        subscriptions=lambda: [SubscriptionChoice("Test subscription", "test-sub", "test-tenant")],
+        resource_groups=lambda _: ["rg-existing"],
+        regions=lambda _: [RegionChoice("westeurope", "West Europe")],
+        models=lambda *_: [ModelChoice("test-model", "1", "OpenAI", "GlobalStandard")],
+        role_definition=lambda *_: "/subscriptions/test-sub/providers/Microsoft.Authorization/roleDefinitions/test",
+    )
+    monkeypatch.setattr(cli, "AzureCliDiscovery", lambda: discovery)
+    forbidden = Mock(side_effect=AssertionError("No subprocess, network, or real writer allowed"))
+    monkeypatch.setattr(cli.subprocess, "run", forbidden)
+    monkeypatch.setattr(cli, "_configure_post_deploy", forbidden)
+    monkeypatch.setattr(cli, "_sync_app_service_settings", forbidden)
+    runner_factory = Mock(side_effect=AssertionError("No azd writes before approval"))
+    provisioner_factory = Mock(side_effect=AssertionError("No ARM writes before approval"))
+    deploy = Mock(side_effect=AssertionError("No deploy before approval"))
+    monkeypatch.setattr(cli, "AzdRunner", runner_factory)
+    monkeypatch.setattr(cli, "AzureProvisioner", provisioner_factory)
+    monkeypatch.setattr(cli, "_deploy_application", deploy)
+    transcript = []
+    approval_events = []
+
+    def run(domain_answers, language="en", final_answers=(), explicit=True, prefix_answers=None):
+        values = iter([
+            *([] if explicit else ["2" if language == "en" else ""]),
+            *(prefix_answers if prefix_answers is not None else [
+                "1", "2", "1", "1", "", "helper", "chatbot-dev", "chat-model", "",
+            ]),
+            *domain_answers, *final_answers,
+        ])
+
+        def answer(question):
+            runner_factory.assert_not_called()
+            provisioner_factory.assert_not_called()
+            deploy.assert_not_called()
+            value = next(values)
+            if isinstance(value, BaseException):
+                raise value
+            transcript.append(question + value)
+            if ("Proceed with" in question or "Procedere con" in question) and value in {"y", "yes", "sì"}:
+                approval_events.append("approved")
+            return value
+
+        def output(message):
+            transcript.append(message)
+            print(message)
+
+        monkeypatch.setattr(cli, "ConsolePrompts", lambda **kwargs: ConsolePrompts(answer, output, **kwargs))
+        return cli.main(["install", *(["--ui-language", language] if explicit else [])])
+
+    return SimpleNamespace(
+        run=run, transcript=transcript, runner=runner_factory,
+        provisioner=provisioner_factory, deploy=deploy,
+        forbidden=forbidden, approvals=approval_events,
+    )
+
+
+@pytest.mark.parametrize("language", ["it", "en"])
+@pytest.mark.parametrize("domain_answers", [
+    ["example.org", "no", "no"],
+    ["example.org", "no", "yes", "example.net", "yes", "no"],
+    ["example.org", "no", "yes", "https://EXAMPLE.ORG./", "yes", "example.net", "yes", "no"],
+])
+def test_interactive_unsupported_policy_never_reaches_terms_or_writers(
+    interactive_install, capsys, language, domain_answers,
+):
+    flow = interactive_install
+    assert flow.run(domain_answers, language) == 2
+    text = "\n".join(flow.transcript)
+    error = capsys.readouterr().err
+    assert "example.org" in error
+    assert "test-sub" not in error and "test-tenant" not in error
+    assert ("Installazione non riuscita" if language == "it" else "Installation failed") in error
+    assert not any(label in text for label in (
+        "Accept Bing", "Accettare costi", "Proceed with", "Procedere con",
+        "Installation plan", "Piano di installazione",
+    ))
+    flow.runner.assert_not_called()
+    flow.provisioner.assert_not_called()
+    flow.deploy.assert_not_called()
+    flow.forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("language", ["it", "en"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_interactive_plan_and_final_default_no_keep_selected_language(
+    interactive_install, capsys, language, explicit,
+):
+    flow = interactive_install
+    assert flow.run(["example.org", "yes", "no"], language, ["yes", "maybe", ""], explicit) == 1
+    text = "\n".join(flow.transcript)
+    assert "example.org" in text
+    if language == "it":
+        assert "Piano di installazione (nessuna modifica effettuata):" in text
+        assert "Procedere con la creazione delle risorse e la distribuzione [s/N]:" in text
+        assert "Installazione annullata; lo stato di Azure non è stato modificato." in text
+        assert "Installation plan" not in text and "Proceed with" not in text
+    else:
+        assert "Installation plan (no changes yet):" in text
+        assert "Proceed with provisioning and deployment [y/N]:" in text
+        assert "Installation cancelled; Azure state was not changed." in text
+        assert "Piano di installazione" not in text and "Procedere con" not in text
+    assert ("Lingua del chatbot e dell'installer /" in text) is not explicit
+    flow.runner.assert_not_called()
+    flow.provisioner.assert_not_called()
+    flow.deploy.assert_not_called()
+    flow.forbidden.assert_not_called()
+    assert not capsys.readouterr().err
+
+
+@pytest.mark.parametrize("language", ["it", "en"])
+@pytest.mark.parametrize("retry", [False, True])
+def test_interactive_success_writes_only_after_explicit_final_approval(
+    interactive_install, monkeypatch, capsys, language, retry,
+):
+    flow = interactive_install
+    runner = Mock()
+    runner.get_environment_values.return_value = {}
+
+    def approved_runner(*_):
+        assert flow.approvals == ["approved"]
+        return runner
+
+    def approved_provision(config):
+        assert flow.approvals == ["approved"]
+        assert config.ui_language == language
+        assert config.websites == ("example.org", "docs.example.net")
+        assert config.strict_websites is True
+        return {}
+
+    flow.runner.side_effect = approved_runner
+    flow.provisioner.side_effect = None
+    flow.provisioner.return_value.run.side_effect = approved_provision
+    flow.deploy.side_effect = lambda _runner, config, _, **_kwargs: SimpleNamespace(config=config)
+    assert flow.run(
+        ["https://EXAMPLE.ORG./", "yes", "yes", "docs.example.net", "yes", "no"],
+        language, ["yes", "sì" if language == "it" else "yes"],
+        prefix_answers=[
+            "bad", "1", "2", "1", "1", "0", "-2", "wrong", "",
+            "Tor Vergata", "UPPER", "helper", "bad env", "chatbot-dev",
+            "bad/route", "chat-model", "maybe", "",
+        ] if retry else None,
+    ) == 0
+    flow.provisioner.return_value.run.assert_called_once()
+    flow.deploy.assert_called_once()
+    runner.ensure_environment.assert_called_once_with("chatbot-dev")
+    flow.forbidden.assert_not_called()
+    text = capsys.readouterr().out
+    assert ("Installazione completata." if language == "it" else "Installation completed.") in text
+    assert json.loads(text.splitlines()[-1])["status"] == "succeeded"
+
+
+@pytest.mark.parametrize("language", ["it", "en"])
+@pytest.mark.parametrize("ending", [EOFError(), KeyboardInterrupt(), StopIteration()])
+def test_interactive_name_retry_cancellation_never_writes(interactive_install, language, ending):
+    flow = interactive_install
+    assert flow.run([], language, prefix_answers=[
+        "1", "2", "1", "1", "", "Tor Vergata", ending,
+    ]) == 1
+    flow.runner.assert_not_called()
+    flow.provisioner.assert_not_called()
+    flow.deploy.assert_not_called()
+    flow.forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("language", ["it", "en"])
+@pytest.mark.parametrize("failure", [OSError("input unavailable"), RuntimeError("input unavailable")])
+def test_input_system_failure_stops_with_localized_context(interactive_install, capsys, language, failure):
+    flow = interactive_install
+    assert flow.run([], language, prefix_answers=[
+        "1", "2", "1", "1", "", "Tor Vergata", failure,
+    ]) == 2
+    error = capsys.readouterr().err
+    assert ("Inserimento dati e individuazione delle risorse" if language == "it"
+            else "Input and discovery") in error
+    assert "input unavailable" in error
+    flow.runner.assert_not_called()
+    flow.provisioner.assert_not_called()
+    flow.deploy.assert_not_called()
+    flow.forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("language", ["it", "en"])
+@pytest.mark.parametrize("ending", ["no", EOFError(), KeyboardInterrupt()])
+def test_final_decline_or_cancellation_after_retries_never_writes(interactive_install, language, ending):
+    flow = interactive_install
+    assert flow.run(["example.org", "yes", "no"], language, ["yes", "maybe", ending],
+                    prefix_answers=[
+                        "1", "2", "1", "1", "", "Tor Vergata", "helper",
+                        "chatbot-dev", "chat-model", "",
+                    ]) == 1
+    flow.runner.assert_not_called()
+    flow.provisioner.assert_not_called()
+    flow.deploy.assert_not_called()
+    flow.forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("flag, value", [
+    ("--chatbot-name", "Tor Vergata"), ("--environment", "UPPER"),
+    ("--deployment-name", "bad/route"), ("--resource-group", "bad group"),
+    ("--model-capacity", "0"),
+])
+def test_noninteractive_bad_field_fails_once_without_prompts_or_writes(monkeypatch, flag, value):
+    forbidden = Mock(side_effect=AssertionError("No interaction or writes allowed"))
+    for name in ("ConsolePrompts", "AzureCliDiscovery", "AzdRunner", "AzureProvisioner", "_deploy_application"):
+        monkeypatch.setattr(cli, name, forbidden)
+    monkeypatch.setattr(cli.subprocess, "run", forbidden)
+    fields = {
+        "--environment": "chatbot-dev", "--location": "westeurope",
+        "--chatbot-name": "helper", "--resource-group": "rg-valid",
+        "--deployment-name": "chat-model", "--model-capacity": "10",
+        "--websites": "example.org",
+    }
+    fields[flag] = value
+    assert cli.main(["install", "--non-interactive", *[
+        item for pair in fields.items() for item in pair
+    ]]) == 2
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("language", ["it", "en"])
+def test_interactive_discovery_eof_and_terms_default_do_not_write(interactive_install, language):
+    flow = interactive_install
+    assert flow.run(["example.org", "yes", "no"], language, []) == 1
+    assert flow.run(["example.org", "yes", "no"], language, [""]) == 2
+    flow.runner.assert_not_called()
+    flow.provisioner.assert_not_called()
+    flow.deploy.assert_not_called()
+
+
+@pytest.mark.parametrize("language", ["it", "en"])
+def test_provider_error_has_localized_stage_without_translating_vendor_detail(
+    interactive_install, capsys, language,
+):
+    flow = interactive_install
+    flow.runner.side_effect = cli.AzdError("VendorDiagnostic: QuotaExceeded")
+    assert flow.run(["example.org", "yes", "no"], language, ["yes", "yes"]) == 2
+    error = capsys.readouterr().err
+    assert "VendorDiagnostic: QuotaExceeded" in error
+    assert ("Salvataggio dell'ambiente" if language == "it" else "Saving the environment") in error
+    flow.provisioner.assert_not_called()
+    flow.deploy.assert_not_called()
+
+
+@pytest.mark.parametrize("language", ["it", "en"])
+def test_install_help_uses_explicit_language(capsys, language):
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["install", "--ui-language", language, "--help"])
+    assert caught.value.code == 0
+    text = capsys.readouterr().out
+    if language == "it":
+        assert "lingua del chatbot e dell'installer" in text
+        assert "include sempre i sottodomini" in text
+        assert "opzioni:" in text and "uso:" in text
+        assert "show this help" not in text
+    else:
+        assert "chatbot and installer language" in text
+        assert "always includes subdomains" in text
+        assert "options:" in text and "usage:" in text
 
 
 @pytest.mark.parametrize(
@@ -29,7 +386,7 @@ def test_dry_run_is_structured_and_never_executes(monkeypatch, capsys, mode, att
     monkeypatch.setattr(cli.subprocess, "run", run)
     monkeypatch.setattr(cli, "_configure_post_deploy", cloud)
 
-    assert cli.main(["plan", "--mode", mode, "--dry-run"]) == 0
+    assert cli.main(["plan", "--mode", mode, "--dry-run", "--websites", "example.org"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["dryRun"] is True
@@ -37,9 +394,9 @@ def test_dry_run_is_structured_and_never_executes(monkeypatch, capsys, mode, att
     assert payload["postDeploy"]["attachSearchTool"] is attached
     assert payload["userExperience"] == {
         "label": (
-            "Bing + your documents (Azure AI Search, optional)"
+            "Authorized websites + documents (Azure AI Search, optional)"
             if attached
-            else "Bing web chat (default)"
+            else "Authorized websites (default)"
         ),
         "bingGroundingConfigured": True,
         "documentSearchConfigured": attached,
@@ -56,6 +413,7 @@ def test_noninteractive_install_dry_run_is_offline_and_deterministic(
     discovery = Mock(side_effect=AssertionError("offline dry-run contacted Azure"))
     monkeypatch.setattr(cli.subprocess, "run", run)
     monkeypatch.setattr(cli, "AzureCliDiscovery", discovery)
+    monkeypatch.setattr(cli, "InstallProgress", Mock(side_effect=AssertionError("No progress on dry-run")))
     args = [
         "install",
         "--non-interactive",
@@ -86,20 +444,24 @@ def test_noninteractive_install_dry_run_is_offline_and_deterministic(
         "--chatbot-name",
         "helper",
         "--websites",
-        "https://docs.example.org,example.net/reference",
+        "https://docs.example.org,example.net",
         "--accept-bing-terms",
         "--foundry-user-role-id",
         "/subscriptions/configured/providers/Microsoft.Authorization/roleDefinitions/foundry-user",
     ]
 
     assert cli.main(args) == 0
-    first = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    first = json.loads(captured.out)
     assert cli.main(args) == 0
-    second = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    second = json.loads(captured.out)
 
     assert first == second
-    assert first["config"]["webGrounding"] == "bing"
-    assert first["config"]["websiteEnforcement"] == "advisory"
+    assert first["config"]["webGrounding"] == "web_search"
+    assert first["config"]["websiteEnforcement"] == "allowed_domains"
     assert first["config"]["uiLanguage"] == "it"
     configured_names = {
         command[3]
@@ -273,7 +635,8 @@ def test_post_deploy_configures_the_runtime_agent_name(monkeypatch):
     cli._configure_post_deploy(resolved)
 
     assert captured["agent_name"] == "generic-assistant"
-    assert captured["tools"]["bing_connection_name"] == "bing-grounding"
+    assert captured["tools"]["allowed_domains"] == ("docs.example.org",)
+    assert "bing_connection_name" not in captured["tools"]
     assert captured["owns_credential"] is True
     assert captured["writer_closed"] is True
 
@@ -350,7 +713,7 @@ def deployment_values(**overrides):
         "FOUNDRY_PROJECT_ENDPOINT": (
             "https://example.services.ai.azure.com/api/projects/project"
         ),
-        "BING_CONNECTION_NAME": "bing-grounding",
+        "WEB_GROUNDING_SITES": "docs.example.org",
     }
     values.update(overrides)
     return values
@@ -378,7 +741,6 @@ def test_observed_arm_casing_is_persisted_with_canonical_azd_keys():
     persisted = {command[3]: command[4] for command in commands}
     assert persisted == {
         "SERVICE_WEB_NAME": "app-example",
-        "BING_CONNECTION_NAME": "bing-grounding",
         "FOUNDRY_PROJECT_ENDPOINT": (
             "https://example.services.ai.azure.com/api/projects/project"
         ),
@@ -435,7 +797,7 @@ def test_explicit_deploy_values_override_persisted_values():
     )
 
     assert resolved.config.chatbot_name == "explicit-agent"
-    assert resolved.config.websites == ("https://explicit.example.org",)
+    assert resolved.config.websites == ("explicit.example.org",)
     assert persisted["CHATBOT_NAME"] == "helper"
     assert persisted["WEB_GROUNDING_SITES"] == ["https://persisted.example.org"]
 
@@ -471,19 +833,18 @@ def test_malformed_persisted_agent_fails_visibly(value):
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        (None, ()),
-        ("", ()),
-        ("docs.example.org, https://example.net/reference", (
-            "https://docs.example.org",
-            "https://example.net/reference",
+        (None, ("docs.example.org",)),
+        ("docs.example.org, https://example.net/", (
+            "docs.example.org",
+            "example.net",
         )),
-        (["docs.example.org", "https://example.net/reference"], (
-            "https://docs.example.org",
-            "https://example.net/reference",
+        (["docs.example.org", "https://example.net/"], (
+            "docs.example.org",
+            "example.net",
         )),
     ],
 )
-def test_persisted_advisory_websites_are_normalized(value, expected):
+def test_persisted_allowed_websites_are_normalized(value, expected):
     persisted = deployment_values(
         **({} if value is None else {"WEB_GROUNDING_SITES": value})
     )
@@ -495,10 +856,11 @@ def test_persisted_advisory_websites_are_normalized(value, expected):
 
 @pytest.mark.parametrize(
     "value",
-    [123, ["https://docs.example.org", 123], "http://docs.example.org"],
+    [123, ["https://docs.example.org", 123], "http://docs.example.org",
+     "", [], "https://example.org/department", "*.example.org"],
 )
-def test_malformed_persisted_advisory_websites_fail_visibly(value):
-    with pytest.raises(cli.ConfigurationError, match="WEB_GROUNDING_SITES|websites"):
+def test_malformed_persisted_allowed_websites_fail_visibly(value):
+    with pytest.raises(cli.ConfigurationError, match="WEB_GROUNDING_SITES|website|domain|DNS"):
         cli._resolve_deploy_config(
             deploy_config(),
             deployment_values(WEB_GROUNDING_SITES=value),
@@ -531,7 +893,7 @@ def test_explicit_standalone_values_configure_foundry_then_app_then_deploy(
     monkeypatch.setenv("CHATBOT_NAME", "helper-new")
     monkeypatch.setenv(
         "WEB_GROUNDING_SITES",
-        "docs.example.org,https://example.net/reference,docs.example.org",
+        "docs.example.org,https://example.net/,docs.example.org",
     )
     monkeypatch.setattr(cli, "AzdRunner", FakeRunner)
     monkeypatch.setattr(
@@ -557,14 +919,14 @@ def test_explicit_standalone_values_configure_foundry_then_app_then_deploy(
     assert events[0] == (
         "foundry",
         "helper-new",
-        ("https://docs.example.org", "https://example.net/reference"),
+        ("docs.example.org", "example.net"),
     )
     assert events[1] == (
         "app",
         {
             "CHATBOT_NAME": "helper-new",
             "WEB_GROUNDING_SITES": (
-                "https://docs.example.org,https://example.net/reference"
+                "docs.example.org,example.net"
             ),
             "KNOWLEDGE_MODE": "off",
             "UI_LANGUAGE": "en",
@@ -583,7 +945,7 @@ def test_persisted_deploy_avoids_divergent_environment_writes(monkeypatch):
     events = []
     persisted = deployment_values(
         CHATBOT_NAME="helper",
-        WEB_GROUNDING_SITES="https://docs.example.org",
+        WEB_GROUNDING_SITES="docs.example.org",
         KNOWLEDGE_MODE="off",
         UI_LANGUAGE="it",
     )
@@ -662,12 +1024,19 @@ def test_app_service_failure_keeps_old_setting_and_stops_before_deploy(monkeypat
     runner.run.assert_not_called()
 
 
-def test_package_failure_occurs_after_valid_agent_and_runtime(monkeypatch):
+@pytest.mark.parametrize("timed_out", [False, True])
+@pytest.mark.parametrize("language", ["it", "en"])
+def test_package_failure_occurs_after_valid_agent_and_runtime(monkeypatch, timed_out, language):
     events = []
 
     class FailingRunner:
         def run(self, command):
+            assert command[:3] == ["azd", "deploy", "web"]
             events.append("deploy")
+            if timed_out:
+                raise cli.AzdError("local wait expired") from cli.subprocess.TimeoutExpired(
+                    command, 900,
+                )
             raise cli.AzdError("package failed")
 
     monkeypatch.setattr(
@@ -677,18 +1046,25 @@ def test_package_failure_occurs_after_valid_agent_and_runtime(monkeypatch):
         cli, "_sync_app_service_settings", lambda resolved, cwd: events.append("app")
     )
 
-    with pytest.raises(cli.AzdError, match="App Service settings are valid"):
+    with pytest.raises(cli.AzdError, match="App Service settings are valid") as caught:
         cli._deploy_application(
             FailingRunner(),
             deploy_config(chatbot_name="helper"),
             deployment_values(
                 CHATBOT_NAME="helper",
-                WEB_GROUNDING_SITES="https://docs.example.org",
+                WEB_GROUNDING_SITES="docs.example.org",
                 KNOWLEDGE_MODE="off",
+                UI_LANGUAGE="it",
             ),
         )
 
     assert events == ["foundry", "app", "deploy"]
+    text = cli.InstallerMessages(language)(str(caught.value))
+    assert ("non è stata confermata" if language == "it" else "was not confirmed") in text
+    assert ("prima di riprovare" if language == "it" else "before retrying") in text
+    assert isinstance(caught.value.__cause__, cli.AzdError)
+    if timed_out:
+        assert isinstance(caught.value.__cause__.__cause__, cli.subprocess.TimeoutExpired)
 
 
 @pytest.mark.parametrize(
@@ -758,9 +1134,13 @@ def test_cross_mode_transitions_use_one_effective_state_and_order(
         "app",
         {
             "CHATBOT_NAME": "helper",
-            "WEB_GROUNDING_SITES": "https://docs.example.org",
+            "WEB_GROUNDING_SITES": "docs.example.org",
             "KNOWLEDGE_MODE": expected_mode,
             "UI_LANGUAGE": "it",
+            **({
+                "STORAGE_ACCOUNT_NAME": "chatbotstorage",
+                "STORAGE_CONTAINER_NAME": "documents",
+            } if expected_mode == "searchBlob" else {}),
         },
     )
     mode_writes = [
@@ -785,7 +1165,7 @@ def test_legacy_deploy_without_persisted_mode_safely_resolves_and_persists_off(
     events = []
     values = deployment_values(
         CHATBOT_NAME="helper",
-        WEB_GROUNDING_SITES="https://docs.example.org",
+        WEB_GROUNDING_SITES="docs.example.org",
     )
     monkeypatch.setattr(cli, "_configure_post_deploy", lambda resolved: None)
     monkeypatch.setattr(cli, "_sync_app_service_settings", lambda resolved, cwd: False)
@@ -834,6 +1214,10 @@ def test_invalid_persisted_mode_fails_before_side_effects(monkeypatch):
     "mutate",
     [
         lambda values: values.pop("SEARCH_CONNECTION_NAME"),
+        lambda values: values.pop("STORAGE_CONTAINER_NAME"),
+        lambda values: values.update(STORAGE_CONTAINER_NAME=""),
+        lambda values: values.update(STORAGE_CONTAINER_NAME="invalid/container"),
+        lambda values: values.pop("STORAGE_ACCOUNT_NAME"),
         lambda values: values.update(
             STORAGE_RESOURCE_ID=(
                 "/subscriptions/configured-subscription/resourceGroups/other-group/"
@@ -885,6 +1269,223 @@ def test_searchblob_required_keys_are_real_provision_outputs():
         assert f"output {name} string" in bicep
 
 
+@pytest.mark.parametrize("action", ["install", "deploy"])
+def test_search_storage_reaches_backend_through_real_settings_commands_before_package(
+    monkeypatch, action
+):
+    import httpx
+    from azure.ai.projects.models import AgentDetails
+    from fastapi.testclient import TestClient
+    from openai import AsyncOpenAI
+    from openai.types.responses import Response
+
+    from app.backend import main as backend
+    from app.backend.config import AppSettings
+    from azure_bing_assistant import azd
+    from azure_bing_assistant.agent import FoundryAgentAdapter, SearchDocumentSource
+
+    values = search_deployment_values(
+        CHATBOT_NAME="helper",
+        UI_LANGUAGE="en",
+        STORAGE_ACCOUNT_NAME="wiredstorage",
+        STORAGE_CONTAINER_NAME="customer-documents",
+        STORAGE_RESOURCE_ID=(
+            "/subscriptions/configured-subscription/resourceGroups/rg-chatbot-dev/"
+            "providers/Microsoft.Storage/storageAccounts/wiredstorage"
+        ),
+    )
+    persisted = {} if action == "install" else dict(values)
+    current = {
+        "FOUNDRY_PROJECT_ENDPOINT": values["FOUNDRY_PROJECT_ENDPOINT"],
+        "CHATBOT_NAME": "helper",
+        "WEB_GROUNDING_SITES": "docs.example.org",
+        "KNOWLEDGE_MODE": "searchBlob",
+        "UI_LANGUAGE": "en",
+        "UI_WELCOME_TITLE": "Custom welcome",
+        "UNRELATED_SETTING": "preserved",
+        "API_KEY": "synthetic-not-for-sync",
+    }
+    before = dict(current)
+    events = []
+    commands = []
+
+    class Runner:
+        def __init__(self, cwd):
+            pass
+
+        def ensure_environment(self, name):
+            assert name == "chatbot-dev"
+
+        def get_environment_values(self, name):
+            assert name == "chatbot-dev"
+            return dict(persisted)
+
+        def run(self, command):
+            if command[:3] == ["azd", "env", "set"]:
+                persisted[command[3]] = command[4]
+                events.append("persist")
+            else:
+                assert command[:3] == ["azd", "deploy", "web"]
+                assert current["STORAGE_ACCOUNT_NAME"] == "wiredstorage"
+                assert current["STORAGE_CONTAINER_NAME"] == "customer-documents"
+                events.append("package")
+
+    class Provisioner:
+        def __init__(self, cwd):
+            pass
+
+        def run(self, config):
+            events.append("provision")
+            return dict(values)
+
+    def run_settings_command(command, **kwargs):
+        assert command[:4] == ["az", "webapp", "config", "appsettings"]
+        assert kwargs["shell"] is False
+        assert command[command.index("--subscription") + 1] == "configured-subscription"
+        assert command[command.index("--resource-group") + 1] == "rg-chatbot-dev"
+        assert command[command.index("--name") + 1] == "app-chatbot-dev"
+        commands.append(command)
+        if command[4] == "list":
+            events.append("settings-read")
+            query = command[command.index("--query") + 1]
+            names = [clause.removeprefix("name=='").removesuffix("'")
+                     for clause in query[2:query.index("]")].split(" || ")]
+            assert set(names) == {
+                "CHATBOT_NAME", "WEB_GROUNDING_SITES", "KNOWLEDGE_MODE", "UI_LANGUAGE",
+                "STORAGE_ACCOUNT_NAME", "STORAGE_CONTAINER_NAME",
+            }
+            return Mock(returncode=0, stderr="", stdout=json.dumps([
+                {"name": name, "value": current[name]} for name in names if name in current
+            ]))
+        assert command[4] == "set"
+        events.append("settings-write")
+        updates = command[command.index("--settings") + 1:command.index("--output")]
+        assert updates == [
+            "STORAGE_ACCOUNT_NAME=wiredstorage",
+            "STORAGE_CONTAINER_NAME=customer-documents",
+        ]
+        current.update(item.split("=", 1) for item in updates)
+        return Mock(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(cli, "AzdRunner", Runner)
+    monkeypatch.setattr(cli, "AzureProvisioner", Provisioner)
+    monkeypatch.setattr(cli, "_configure_post_deploy", lambda resolved: events.append("foundry"))
+    monkeypatch.setattr(azd, "azure_cli_invocation", lambda args: (list(args), {}))
+    monkeypatch.setattr(azd.subprocess, "run", run_settings_command)
+    # Environment discovery and all CLI subprocesses are replaced, not synchronization.
+    monkeypatch.setattr(cli.os, "environ", {})
+    arguments = [
+        action, "--mode", "searchBlob", "--environment", "chatbot-dev", "--ui-language", "en",
+    ]
+    if action == "install":
+        role_prefix = (
+            "/subscriptions/configured-subscription/providers/"
+            "Microsoft.Authorization/roleDefinitions/"
+        )
+        arguments += [
+            "--non-interactive", "--subscription", "configured-subscription",
+            "--resource-group", "rg-chatbot-dev", "--location", "westeurope",
+            "--model-name", "offline-model", "--model-version", "1",
+            "--model-format", "OpenAI", "--model-sku", "GlobalStandard",
+            "--model-capacity", "10", "--deployment-name", "chat-model",
+            "--chatbot-name", "helper", "--websites", "docs.example.org", "--accept-bing-terms",
+            "--foundry-user-role-id", role_prefix + "foundry-user",
+            "--storage-blob-data-reader-role-id", role_prefix + "blob-reader",
+            "--search-index-data-reader-role-id", role_prefix + "search-reader",
+        ]
+
+    assert cli.main(arguments) == 0
+    assert len(commands) == 2
+    assert events.index("foundry") < events.index("settings-read")
+    assert events.index("settings-read") < events.index("settings-write") < events.index("package")
+    if action == "install":
+        assert events.index("provision") < events.index("foundry")
+    assert current == {
+        **before,
+        "STORAGE_ACCOUNT_NAME": "wiredstorage",
+        "STORAGE_CONTAINER_NAME": "customer-documents",
+    }
+    settings = AppSettings.from_environment(current)
+    assert settings.document_source == SearchDocumentSource("wiredstorage", "customer-documents")
+
+    tools = [
+        {"type": "web_search", "filters": {"allowed_domains": ["docs.example.org"]}},
+        {"type": "azure_ai_search", "azure_ai_search": {"indexes": [{
+            "project_connection_id": "search-connection", "index_name": "documents",
+        }]}},
+    ]
+    private_url = (
+        "https://wiredstorage.blob.core.windows.net/customer-documents/handbook.pdf?sig=synthetic"
+    )
+    payload = {
+        "id": "resp-offline", "object": "response", "created_at": 0,
+        "status": "completed", "model": "offline-model", "tools": tools,
+        "parallel_tool_calls": True, "tool_choice": "auto",
+        "output": [
+            {"type": "azure_ai_search_call", "id": "ais-offline",
+             "call_id": "search-offline", "status": "completed",
+             "results": [{"url": private_url, "title": "Private", "content": "Document text"}]},
+            {"type": "message", "id": "msg-offline", "status": "completed", "role": "assistant",
+             "content": [{"type": "output_text", "text": "Document answer",
+                          "annotations": [{"type": "url_citation", "url": private_url,
+                                           "title": "Private", "start_index": 0, "end_index": 8}]}]},
+        ],
+    }
+
+    class Agents:
+        async def get(self, *, agent_name):
+            assert agent_name == "helper"
+            return AgentDetails({
+                "id": "helper", "object": "agent", "name": "helper",
+                "versions": {"latest": {
+                    "id": "helper:7", "name": "helper", "version": "7",
+                    "object": "agent.version", "created_at": 0, "metadata": {},
+                    "definition": {"kind": "prompt", "model": "offline-model", "tools": tools},
+                }},
+            })
+
+    requests = []
+
+    def response_transport(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json=payload)
+
+    sdk = AsyncOpenAI(
+        api_key="offline-synthetic-key", base_url="https://offline.example/openai/v1/",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(response_transport)),
+        max_retries=0,
+    )
+    sdk_create = sdk.responses.create
+    parsed = []
+
+    async def capture_response(**kwargs):
+        response = await sdk_create(**kwargs)
+        assert isinstance(response, Response)
+        parsed.append(response)
+        return response
+
+    sdk.responses.create = capture_response
+    monkeypatch.setattr(
+        backend, "FoundryAgentAdapter",
+        lambda *args, **kwargs: FoundryAgentAdapter(
+            *args, **kwargs, openai_client=sdk, project_client=SimpleNamespace(agents=Agents())
+        ),
+    )
+    with TestClient(backend.create_app(settings)) as client:
+        response = client.post("/api/chat", json={"message": "Offline document question"})
+    assert response.status_code == 200
+    assert len(parsed) == 1
+    assert requests[0]["agent_reference"]["version"] == "7"
+    assert response.json()["citations"][0]["label"] == "Document 1"
+    assert response.json()["citations"][0]["reference"].startswith("documents/")
+    assert response.json()["consultedSources"] == []
+    assert response.json()["webSearchUsed"] is False
+    assert "wiredstorage" not in response.text
+    assert "customer-documents" not in response.text
+    assert "sig=" not in response.text
+    assert "Private" not in response.text
+
+
 def test_searchblob_effective_mode_reaches_search_and_foundry_adapters(monkeypatch):
     events = []
 
@@ -931,7 +1532,8 @@ def test_searchblob_effective_mode_reaches_search_and_foundry_adapters(monkeypat
     cli._configure_post_deploy(resolved)
 
     tools = next(event[1] for event in events if event[0] == "tools")
-    assert tools["bing_connection_name"] == "bing-grounding"
+    assert tools["allowed_domains"] == ("docs.example.org",)
+    assert "bing_connection_name" not in tools
     assert tools["search_index_name"] == "documents"
     assert tools["search_connection_name"] == "search-connection"
     assert events.index(("search-configured",)) < next(
@@ -1042,6 +1644,9 @@ def test_ui_config_flows_from_cli_plan_to_bicep_and_runtime(monkeypatch, capsys)
         "disclaimer": "AI output requires verification.",
         "suggestedQuestions": ["First question?", "Second question?"],
         "knowledgeMode": "off",
+        "allowedDomains": ["docs.example.org"],
+        "websiteEnforcement": "allowed_domains",
+        "includesSubdomains": True,
     }
 
 

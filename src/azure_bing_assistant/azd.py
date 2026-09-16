@@ -190,11 +190,13 @@ class AzureCliRunner:
 
 
 class AppServiceSettingsSynchronizer:
+    _STORAGE_SETTING_NAMES = ("STORAGE_ACCOUNT_NAME", "STORAGE_CONTAINER_NAME")
     _SETTING_NAMES = (
         "CHATBOT_NAME",
         "WEB_GROUNDING_SITES",
         "KNOWLEDGE_MODE",
         "UI_LANGUAGE",
+        *_STORAGE_SETTING_NAMES,
     )
 
     def __init__(self, cwd: str, runner: AzureCliRunner | None = None) -> None:
@@ -207,11 +209,18 @@ class AppServiceSettingsSynchronizer:
         web_app_name: str,
         settings: Mapping[str, str],
     ) -> bool:
-        desired = {name: settings[name] for name in self._SETTING_NAMES}
+        desired = {
+            name: settings[name]
+            for name in self._SETTING_NAMES
+            if name not in self._STORAGE_SETTING_NAMES
+        }
+        desired.update({
+            name: settings.get(name, "") if desired["KNOWLEDGE_MODE"] == "searchBlob" else ""
+            for name in self._STORAGE_SETTING_NAMES
+        })
         query = (
-            "[?name=='CHATBOT_NAME' || name=='WEB_GROUNDING_SITES' || "
-            "name=='KNOWLEDGE_MODE' || name=='UI_LANGUAGE']."
-            "{name:name,value:value}"
+            "[?" + " || ".join(f"name=='{name}'" for name in self._SETTING_NAMES)
+            + "].{name:name,value:value}"
         )
         result = self.runner.run(
             [
@@ -245,6 +254,9 @@ class AppServiceSettingsSynchronizer:
         ):
             raise AzdError("Azure CLI returned unexpected App Service settings")
         current = {row["name"]: row["value"] for row in rows}
+        # Missing and empty storage identities both mean unconfigured in the backend.
+        for name in self._STORAGE_SETTING_NAMES:
+            current.setdefault(name, "")
         changed = {
             name: value for name, value in desired.items() if current.get(name) != value
         }

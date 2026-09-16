@@ -94,9 +94,11 @@ param uiSuggestedQuestions string = ''
 @allowed([
   true
 ])
+#disable-next-line no-unused-params
 param bingTermsAccepted bool
 
-@description('Advisory preferred public sites; standard Bing grounding does not enforce them.')
+@minLength(1)
+@description('Required normalized comma-separated allowed domains for native web_search (includes subdomains).')
 param webGroundingSites string
 
 var token = uniqueString(subscription().id, environmentName)
@@ -157,17 +159,6 @@ module foundry 'modules/foundry.bicep' = {
   }
 }
 
-module bing 'modules/bing.bicep' = {
-  name: 'bing-grounding'
-  scope: resourceGroup(resourceGroupName)
-  params: {
-    accountName: foundry.outputs.accountName
-    projectName: foundry.outputs.projectName
-    bingName: 'bing-${environmentName}-${token}'
-    termsAccepted: bingTermsAccepted
-  }
-}
-
 module searchConnection 'modules/search-connection.bicep' = if (knowledgeMode == 'searchBlob') {
   name: 'search-connection'
   scope: resourceGroup(resourceGroupName)
@@ -201,7 +192,6 @@ output storageContainerName string = knowledgeMode == 'searchBlob' ? searchBlob!
 output AZURE_RESOURCE_GROUP string = resourceGroupName
 output SERVICE_WEB_NAME string = webapp.outputs.appName
 output FOUNDRY_PROJECT_ENDPOINT string = 'https://${foundry.outputs.accountName}.services.ai.azure.com/api/projects/${foundry.outputs.projectName}'
-output BING_CONNECTION_NAME string = bing.outputs.connectionName
 output SEARCH_ENDPOINT string = knowledgeMode == 'searchBlob' ? 'https://${searchBlob!.outputs.searchName}.search.windows.net' : ''
 output SEARCH_INDEX_NAME string = knowledgeMode == 'searchBlob' ? 'documents' : ''
 output SEARCH_INDEXER_NAME string = knowledgeMode == 'searchBlob' ? 'documents-indexer' : ''

@@ -12,7 +12,91 @@ from azure_bing_assistant.provision import (
     _canonical_deployment_outputs,
     _deployment_parameters,
     provision_argv,
+    DeploymentFailedError,
 )
+
+
+@pytest.mark.parametrize("language", ["it", "en"])
+def test_failed_payload_preserves_safe_codes_and_exact_diagnostics_without_calls(language):
+    current = "/subscriptions/example-sub/providers/Microsoft.Resources/deployments/chatbot-demo"
+    nested = "/subscriptions/example-sub/resourceGroups/rg-demo/providers/Microsoft.Resources/deployments/foundry"
+    payload = {"properties": {
+        "provisioningState": "Failed",
+        "parameters": {"password": {"value": "PARAMETER_SECRET"}},
+        "error": {
+            "code": "DeploymentFailed",
+            "message": "Authorization: Bearer BEARER_SECRET",
+            "headers": {"api-key": "HEADER_SECRET"},
+            "details": [{
+                "code": "ResourceDeploymentFailure", "target": nested,
+                "message": f"The deployment '{nested}' failed. https://example.org/?sig=SAS_SECRET",
+                "details": [{
+                    "code": "InsufficientQuota",
+                    "message": "Tokens Per Minute quota: operation requires 1000 new capacity; current usage 7; current limit 80. api-key=KEY_SECRET",
+                    "innererror": {"code": "CapacityLimitExceeded", "message": "USER_CONTENT"},
+                }],
+            }],
+        },
+    }}
+    arm = AzureArmClient.__new__(AzureArmClient)
+    arm._send_json = Mock(side_effect=AssertionError("no extra requests"))
+    with pytest.raises(DeploymentFailedError) as caught:
+        arm._poll_deployment("https://management.azure.com" + current + "?api-version=example", 0, payload, {})
+    text = caught.value.render(language)
+    for code in ("DeploymentFailed", "ResourceDeploymentFailure", "InsufficientQuota", "CapacityLimitExceeded"):
+        assert code in text
+    assert "1000" in text and "80" in text
+    assert "az deployment operation sub list --subscription 'example-sub' --name 'chatbot-demo' --output json" in text
+    assert "az deployment operation group list --subscription 'example-sub' --resource-group 'rg-demo' --name 'foundry' --output json" in text
+    assert "non è una causa confermata" in text if language == "it" else "not a confirmed root cause" in text
+    for forbidden in ("PARAMETER_SECRET", "BEARER_SECRET", "HEADER_SECRET", "SAS_SECRET", "KEY_SECRET", "USER_CONTENT", "api-version"):
+        assert forbidden not in text
+    arm._send_json.assert_not_called()
+
+
+def test_terminal_error_context_is_bounded_and_rejects_unsafe_targets():
+    current = "https://management.azure.com/subscriptions/example-sub/providers/Microsoft.Resources/deployments/demo"
+    error = {"code": "ResourceDeploymentFailure", "details": [
+        {"code": "password=CODE_SECRET", "target": "/subscriptions/example-sub/resourceGroups/rg-demo/providers/Microsoft.Resources/deployments/demo?sig=SAS_SECRET"},
+        {"code": "not a code USER_CONTENT", "target": "/subscriptions/other-sub/providers/Microsoft.Resources/deployments/other"},
+        *({"code": f"Failure{index}", "message": "PRIVATE" * 10000} for index in range(1000)),
+    ]}
+    text = str(DeploymentFailedError("Canceled", current, error))
+    assert "Canceled" in text
+    assert "ResourceDeploymentFailure" in text
+    assert len(text) < 2000 and text.count("az deployment operation") == 1
+    assert not any(value in text for value in ("SECRET", "PRIVATE", "USER_CONTENT", "other-sub", "Failure999"))
+
+
+def test_nested_deployment_id_from_existing_message_without_raw_prose():
+    current = "https://management.azure.com/subscriptions/example-sub/providers/Microsoft.Resources/deployments/demo"
+    nested = "/subscriptions/example-sub/resourceGroups/rg-demo/providers/Microsoft.Resources/deployments/foundry"
+    error = {"code": "ResourceDeploymentFailure", "message": f"The deployment '{nested}' failed. PRIVATE"}
+    text = str(DeploymentFailedError("Failed", current, error))
+    assert "--resource-group 'rg-demo' --name 'foundry'" in text and "PRIVATE" not in text
+
+
+@pytest.mark.parametrize("payload,expected", [
+    ({"properties": {}}, "valid deployment provisioning state"),
+    ({"properties": {"provisioningState": "Running"}}, "before timeout"),
+])
+def test_missing_state_and_timeout_do_not_invent_terminal_failure(payload, expected):
+    arm = AzureArmClient.__new__(AzureArmClient)
+    arm._send_json = Mock(side_effect=AssertionError("no extra requests"))
+    with pytest.raises(ProvisioningError, match=expected) as caught:
+        arm._poll_deployment("https://management.azure.com/example", -1, payload, {})
+    assert not isinstance(caught.value, DeploymentFailedError)
+    arm._send_json.assert_not_called()
+
+
+def test_cleanup_cannot_mask_primary_terminal_error():
+    arm = AzureArmClient.__new__(AzureArmClient)
+    arm.close = Mock(side_effect=RuntimeError("cleanup failure"))
+    failure = ProvisioningError("primary error")
+    with pytest.raises(ProvisioningError) as caught:
+        with arm:
+            raise failure
+    assert caught.value is failure
 
 
 def complete_config(mode=KnowledgeMode.OFF):
@@ -159,7 +243,6 @@ def test_deployment_outputs_use_canonical_names_for_any_exact_case(
 
     assert outputs == {
         "SERVICE_WEB_NAME": "app-example",
-        "BING_CONNECTION_NAME": "bing-grounding",
         "FOUNDRY_PROJECT_ENDPOINT": (
             "https://example.services.ai.azure.com/api/projects/project"
         ),
@@ -185,17 +268,17 @@ def test_off_mode_empty_optional_outputs_remain_canonical_and_valid():
 
 def test_missing_required_deployment_output_fails():
     result = deployment_result()
-    del result["properties"]["outputs"]["binG_CONNECTION_NAME"]
+    del result["properties"]["outputs"]["servicE_WEB_NAME"]
 
-    with pytest.raises(ProvisioningError, match="BING_CONNECTION_NAME"):
+    with pytest.raises(ProvisioningError, match="SERVICE_WEB_NAME"):
         _canonical_deployment_outputs(result)
 
 
 def test_empty_required_deployment_output_fails():
     result = deployment_result()
-    result["properties"]["outputs"]["binG_CONNECTION_NAME"]["value"] = ""
+    result["properties"]["outputs"]["servicE_WEB_NAME"]["value"] = ""
 
-    with pytest.raises(ProvisioningError, match="BING_CONNECTION_NAME"):
+    with pytest.raises(ProvisioningError, match="SERVICE_WEB_NAME"):
         _canonical_deployment_outputs(result)
 
 
@@ -214,10 +297,10 @@ def test_case_duplicate_deployment_outputs_fail_without_value_disclosure():
 
 def test_invalid_output_type_fails_without_value_disclosure():
     result = deployment_result()
-    result["properties"]["outputs"]["BING_CONNECTION_NAME"] = {
+    result["properties"]["outputs"]["SERVICE_WEB_NAME"] = {
         "value": {"token": "sensitive-token-value"}
     }
-    del result["properties"]["outputs"]["binG_CONNECTION_NAME"]
+    del result["properties"]["outputs"]["servicE_WEB_NAME"]
 
     with pytest.raises(ProvisioningError, match="invalid deployment output type") as caught:
         _canonical_deployment_outputs(result)

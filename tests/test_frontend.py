@@ -166,7 +166,10 @@ def test_config_load_requires_valid_payload_and_never_invents_a_failed_mode():
           welcomeSubtitle: "Ask a question.",
           disclaimer: "Verify important information.",
           suggestedQuestions: [],
-          knowledgeMode: "off"
+          knowledgeMode: "off",
+          allowedDomains: ["example.org"],
+          websiteEnforcement: "allowed_domains",
+          includesSubdomains: true
         };
         (async () => {
           for (const knowledgeMode of ["off", "searchBlob"]) {
@@ -182,12 +185,17 @@ def test_config_load_requires_valid_payload_and_never_invents_a_failed_mode():
                 loaded.config.language
               ).label,
               knowledgeMode === "off"
-                ? "Chat web Bing (predefinita)"
-                : "Bing + documenti (Azure AI Search, facoltativo)"
+                ? "Siti autorizzati (predefinita)"
+                : "Siti autorizzati + documenti (Azure AI Search, facoltativo)"
             );
           }
 
           const failures = [
+            async () => ({ ok: true, async json() { return { ...valid, allowedDomains: undefined }; } }),
+            async () => ({ ok: true, async json() { return { ...valid, allowedDomains: [] }; } }),
+            async () => ({ ok: true, async json() { return { ...valid, allowedDomains: ["*.example.org"] }; } }),
+            async () => ({ ok: true, async json() { return { ...valid, websiteEnforcement: "advisory" }; } }),
+            async () => ({ ok: true, async json() { return { ...valid, includesSubdomains: false }; } }),
             async () => ({ ok: false, async json() { throw new Error("unused"); } }),
             async () => { throw new TypeError("network rejected"); },
             async () => ({ ok: true, async json() { return { ...valid, knowledgeMode: "other" }; } }),
@@ -235,21 +243,21 @@ def test_human_facing_mode_copy_is_explicit_and_does_not_overpromise():
     run_node(
         """
         const web = app.modePresentation("off", "en");
-        assert.equal(web.label, "Bing web chat (default)");
+        assert.equal(web.label, "Authorized websites (default)");
         assert.match(web.detail, /Private documents are not available/);
         assert.doesNotMatch(web.summary, /documents/i);
 
         const documents = app.modePresentation("searchBlob", "en");
         assert.equal(
           documents.label,
-          "Bing + your documents (Azure AI Search, optional)"
+          "Authorized websites + documents (Azure AI Search, optional)"
         );
         assert.match(documents.detail, /configured/);
         assert.match(documents.detail, /depends on administrator indexing/);
         assert.doesNotMatch(documents.detail, /ready|indexed successfully/i);
 
         const italianWeb = app.modePresentation("off", "it");
-        assert.equal(italianWeb.label, "Chat web Bing (predefinita)");
+        assert.equal(italianWeb.label, "Siti autorizzati (predefinita)");
         assert.match(italianWeb.detail, /documenti privati non sono disponibili/i);
         const italianDocuments = app.modePresentation("searchBlob", "it");
         assert.match(italianDocuments.detail, /dipende dall'indicizzazione/i);

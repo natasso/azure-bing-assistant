@@ -14,6 +14,34 @@ from azure_bing_assistant.azd import (
 from azure_bing_assistant.azure_cli import AzureCliResolutionError
 
 
+class RecordingAppSettingsRunner:
+    def __init__(self, settings):
+        self.settings = dict(settings)
+        self.commands = []
+
+    def run(self, command):
+        self.commands.append(command)
+        assert command[:4] == ["az", "webapp", "config", "appsettings"]
+        if command[4] == "list":
+            query = command[command.index("--query") + 1]
+            assert query == (
+                "[?name=='CHATBOT_NAME' || name=='WEB_GROUNDING_SITES' || "
+                "name=='KNOWLEDGE_MODE' || name=='UI_LANGUAGE' || "
+                "name=='STORAGE_ACCOUNT_NAME' || name=='STORAGE_CONTAINER_NAME']."
+                "{name:name,value:value}"
+            )
+            names = [clause.removeprefix("name=='").removesuffix("'")
+                     for clause in query[2:query.index("]")].split(" || ")]
+            return CommandResult(command, json.dumps([
+                {"name": name, "value": self.settings[name]}
+                for name in names if name in self.settings
+            ]))
+        assert command[4] == "set"
+        updates = command[command.index("--settings") + 1:command.index("--output")]
+        self.settings.update(item.split("=", 1) for item in updates)
+        return CommandResult(command, "")
+
+
 def test_runner_uses_argv_and_disables_shell(monkeypatch):
     completed = Mock(returncode=0, stdout="ok", stderr="")
     run = Mock(return_value=completed)
@@ -259,3 +287,82 @@ def test_ui_language_is_synchronized_without_overwriting_other_settings(
         assert all(not item.startswith("CHATBOT_NAME=") for item in update)
     else:
         assert len(commands) == 1
+
+
+@pytest.mark.parametrize("before_storage", [
+    {},
+    {"STORAGE_ACCOUNT_NAME": "", "STORAGE_CONTAINER_NAME": ""},
+    {"STORAGE_ACCOUNT_NAME": "oldstorage", "STORAGE_CONTAINER_NAME": "old-documents"},
+    {"STORAGE_ACCOUNT_NAME": "trustedstorage", "STORAGE_CONTAINER_NAME": "old-documents"},
+    {"STORAGE_ACCOUNT_NAME": "oldstorage", "STORAGE_CONTAINER_NAME": "private-documents"},
+    {"STORAGE_ACCOUNT_NAME": "trustedstorage", "STORAGE_CONTAINER_NAME": "private-documents"},
+])
+def test_search_storage_identity_is_read_written_exactly_and_compared(before_storage):
+    base = {
+        "CHATBOT_NAME": "helper",
+        "WEB_GROUNDING_SITES": "docs.example.org",
+        "KNOWLEDGE_MODE": "searchBlob",
+        "UI_LANGUAGE": "en",
+    }
+    storage = {
+        "STORAGE_ACCOUNT_NAME": "trustedstorage",
+        "STORAGE_CONTAINER_NAME": "private-documents",
+    }
+    unrelated = {
+        "UNRELATED_SETTING": "preserved",
+        "UI_WELCOME_TITLE": "Custom welcome",
+        "API_KEY": "synthetic-not-for-sync",
+    }
+    runner = RecordingAppSettingsRunner({**base, **before_storage, **unrelated})
+    sync = AppServiceSettingsSynchronizer(".", runner)
+
+    changed = sync.synchronize("subscription", "group", "web", {
+        **base, **storage, "UNRELATED_SETTING": "do-not-write", "API_KEY": "do-not-write",
+    })
+
+    expected_updates = {
+        name: value for name, value in storage.items() if before_storage.get(name) != value
+    }
+    assert changed is bool(expected_updates)
+    assert runner.settings == {**base, **storage, **unrelated}
+    assert len(runner.commands) == (2 if expected_updates else 1)
+    if expected_updates:
+        update = runner.commands[1]
+        assert update[update.index("--settings") + 1:update.index("--output")] == [
+            f"{name}={value}" for name, value in expected_updates.items()
+        ]
+    assert sync.synchronize("subscription", "group", "web", {**base, **storage}) is False
+    assert runner.commands[-1][4] == "list"
+
+
+@pytest.mark.parametrize("before_storage", [
+    {},
+    {"STORAGE_ACCOUNT_NAME": "", "STORAGE_CONTAINER_NAME": ""},
+    {"STORAGE_ACCOUNT_NAME": "oldstorage", "STORAGE_CONTAINER_NAME": "old-documents"},
+])
+@pytest.mark.parametrize("supplied_storage", [{}, {
+    "STORAGE_ACCOUNT_NAME": "ignoredstorage", "STORAGE_CONTAINER_NAME": "ignored-documents",
+}])
+def test_off_storage_is_optional_absent_is_noop_and_stale_identity_is_cleared(
+    before_storage, supplied_storage
+):
+    from app.backend.config import AppSettings
+
+    base = {
+        "FOUNDRY_PROJECT_ENDPOINT": "https://offline.services.ai.azure.com/api/projects/project",
+        "CHATBOT_NAME": "helper",
+        "WEB_GROUNDING_SITES": "docs.example.org",
+        "KNOWLEDGE_MODE": "off",
+        "UI_LANGUAGE": "it",
+    }
+    runner = RecordingAppSettingsRunner({**base, **before_storage})
+    sync = AppServiceSettingsSynchronizer(".", runner)
+    changed = sync.synchronize("subscription", "group", "web", {**base, **supplied_storage})
+
+    assert changed is any(before_storage.values())
+    assert runner.settings == {**base, **{name: "" for name in before_storage}}
+    assert AppSettings.from_environment(runner.settings).document_source is None
+    if not before_storage:
+        assert len(runner.commands) == 1
+        assert not any(name.startswith("STORAGE_") for name in runner.settings)
+    assert sync.synchronize("subscription", "group", "web", base) is False

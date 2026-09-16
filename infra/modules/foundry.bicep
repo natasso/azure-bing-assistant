@@ -51,6 +51,10 @@ resource project 'Microsoft.CognitiveServices/accounts/projects@2025-06-01' = {
 resource modelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2025-06-01' = {
   parent: account
   name: modelDeploymentName
+  // Child writes can conflict on the parent account; create the project first.
+  dependsOn: [
+    project
+  ]
   sku: {
     name: modelSku
     capacity: modelCapacity

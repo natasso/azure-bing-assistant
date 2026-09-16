@@ -4,7 +4,42 @@ from azure_bing_assistant.config import (
     ConfigurationError,
     InstallerConfig,
     KnowledgeMode,
+    validate_azure_name,
+    validate_identifier,
+    validate_model_capacity,
+    validate_resource_group,
 )
+
+
+@pytest.mark.parametrize("field, validator, valid, invalid", [
+    ("chatbot_name", lambda value: validate_identifier("chatbot_name", value),
+     ["abc", "a" * 24, "a--"], ["ab", "a" * 25, "Tor Vergata", "Upper", "1abc", "a_b"]),
+    ("environment_name", lambda value: validate_identifier("environment_name", value),
+     ["abc", "a" * 24, "a-1"], ["", "ab", "a" * 25, "Upper", "bad name", "1abc"]),
+    ("resource_group_name", validate_resource_group,
+     ["a", "a" * 90, "A._()-", "trailing."], ["a" * 91, "bad name", "a/b", "café"]),
+    ("model_deployment_name", lambda value: validate_azure_name("model_deployment_name", value),
+     ["a", "1", "a" * 128, "A.1_-"], ["", "a" * 129, "-abc", "chat model", "a/b"]),
+    ("model_capacity", validate_model_capacity, [1, 10, 10000], [0, -1]),
+])
+def test_shared_wizard_validators_match_final_config_boundaries(field, validator, valid, invalid):
+    for value in valid + invalid:
+        arguments = dict(environment_name="chatbot-dev", location="westeurope", knowledge_mode=KnowledgeMode.OFF)
+        arguments[field] = value
+        if value in invalid:
+            with pytest.raises(ConfigurationError):
+                validator(value)
+            with pytest.raises(ConfigurationError):
+                InstallerConfig(**arguments)
+        else:
+            assert validator(value) == value
+            assert getattr(InstallerConfig(**arguments), field) == value
+
+
+def test_optional_resource_group_config_semantics_are_unchanged():
+    for value in (None, ""):
+        config = InstallerConfig("chatbot-dev", "westeurope", KnowledgeMode.OFF, resource_group_name=value)
+        assert config.resource_group_name == value
 
 
 @pytest.mark.parametrize("mode", ["off", "searchBlob"])
@@ -36,14 +71,17 @@ def test_invalid_boolean_environment_is_not_silently_false():
         )
 
 
-def test_strict_websites_fail_closed_without_supported_integration():
-    with pytest.raises(ConfigurationError, match="not provisioned"):
-        InstallerConfig(
+def test_strict_websites_is_compatibility_alias_not_a_broad_mode():
+    for strict in (False, True):
+        config = InstallerConfig(
             environment_name="chatbot-dev",
             location="westeurope",
             knowledge_mode=KnowledgeMode.OFF,
-            strict_websites=True,
+            websites=("example.org",),
+            strict_websites=strict,
         )
+        assert config.strict_websites is True
+        assert config.public_parameters()["websiteEnforcement"] == "allowed_domains"
 
 
 def test_runtime_foundry_configuration_is_paired_and_validated():
@@ -70,6 +108,7 @@ def test_runtime_foundry_configuration_is_paired_and_validated():
                 "https://example.services.ai.azure.com/api/projects/project"
             ),
             "CHATBOT_NAME": "generic-assistant",
+            "WEB_GROUNDING_SITES": "example.org",
         }
     )
     assert settings.chatbot_name == "generic-assistant"

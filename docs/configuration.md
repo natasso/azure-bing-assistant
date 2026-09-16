@@ -36,6 +36,17 @@ dall'accesso dei visitatori e restano necessarie.
   Blob Data Reader e Search Index Data Reader quando applicabili.
 - Sessioni `az` e `azd` con un account autorizzato nello stesso tenant.
 
+L'identità che esegue l'installer deve anche avere **Foundry User** (o permessi
+data-plane equivalenti, inclusa la scrittura degli agenti) sul progetto Foundry.
+**Owner** o **Contributor** da soli non concedono questi permessi. Il ruolo
+assegnato alla Managed Identity dell'app non autorizza l'installatore.
+Per un progetto nuovo, un amministratore può concedere il ruolo a uno scope
+superiore appropriato prima dell'installazione, oppure al solo progetto dopo la
+creazione delle risorse. Attendere la propagazione RBAC, che può richiedere
+diversi minuti, poi riprendere con
+`python -m azure_bing_assistant deploy --environment <nome-installazione> --ui-language it`.
+Questo comando riusa gli output salvati senza ricreare l'infrastruttura.
+
 I nomi di modello, versioni, SKU, capacità, sottoscrizioni e role definition ID
 negli esempi non sono valori convalidati: sostituirli con valori reali del tenant.
 Azure resta autorevole per disponibilità regionale, quota e compatibilità.
@@ -83,16 +94,250 @@ Il wizard:
 
 1. legge da Azure sottoscrizioni abilitate, gruppi di risorse, regioni,
    combinazioni modello/versione/formato/SKU e ruoli;
-2. chiede nomi, capacità e siti HTTPS preferiti;
-3. propone **Bing web chat** per impostazione predefinita e chiede se aggiungere
+2. chiede nomi, capacità e domini pubblici autorizzati obbligatori;
+3. propone **Siti autorizzati** per impostazione predefinita e chiede se aggiungere
    Blob Storage e Azure AI Search;
 4. richiede l'accettazione di costi, termini e flusso dati Bing;
 5. mostra un piano e chiede conferma prima delle modifiche.
 
-Il wizard chiede la lingua dell'interfaccia e propone **Italiano** premendo
-Invio. `--ui-language it|en` può preselezionarla anche nel comando interattivo.
+Alla prima esecuzione il selettore iniziale bilingue propone **Italiano** premendo Invio. La lingua
+scelta controlla sia il chatbot sia tutte le domande, gli aiuti, i riepiloghi e
+le conferme dell'installer. `--ui-language it|en` salta il selettore e preseleziona
+la lingua anche nel comando interattivo. Nomi Azure, SKU, identificatori regionali,
+chiavi JSON e diagnostica tecnica del provider restano invariati; gli errori del
+provider sono accompagnati dal contesto della fase nella lingua scelta.
 Gli altri argomenti `--ui-*` per testi personalizzati vengono elaborati solo con
 `--non-interactive`.
+
+Ogni domanda mostra prima formato, limiti e valore predefinito (se presente).
+Un valore non valido richiede **solo lo stesso campo**, mantenendo in memoria le
+risposte precedenti senza ripetere le letture Azure già completate. Il nome
+tecnico del chatbot e il nome dell'installazione richiedono **3–24 lettere
+minuscole, cifre o trattini, iniziando con una lettera**; non vengono corretti
+automaticamente. Il titolo pubblico può contenere spazi e si configura
+separatamente nei campi `UI_*`. Il gruppo di risorse ammette 1–90 lettere ASCII,
+cifre, punti, underscore, parentesi o trattini. Il nome della distribuzione
+identifica il percorso del modello sull'endpoint, non il modello di catalogo:
+1–128 lettere ASCII, cifre, punti, underscore o trattini, con lettera o cifra
+iniziale (es. `chat-model`). Sono controlli locali: esistenza, autorizzazioni,
+quota e compatibilità Azure restano da verificare con il servizio.
+
+Esempio di correzione immediata (estratto):
+
+```text
+Nome tecnico del chatbot: Tor Vergata
+Nome tecnico del chatbot deve contenere 3-24 lettere minuscole, cifre o trattini e iniziare con una lettera
+Nome tecnico del chatbot: assistente-demo
+```
+
+Nei menu, un numero non valido ripropone la stessa scelta; Invio seleziona
+la lingua proposta nel menu iniziale; gli altri menu hanno un valore predefinito
+solo quando una scelta precedente salvata è ancora disponibile.
+Una capacità non valida ripropone solo la capacità, senza sostituirla
+silenziosamente con il valore predefinito. Invio nelle domande sì/no accetta il
+valore mostrato: termini e conferma finale hanno **sempre No** come predefinito;
+il rifiuto interrompe l'installazione.
+Ctrl+C/EOF annulla anche durante una correzione. Gli argomenti non interattivi
+errati restano errori singoli, senza domande. Riavviare manualmente un wizard
+già aperto: con l'installazione editable non serve reinstallare il pacchetto.
+
+#### Riprendere le risposte dell'installer
+
+Solo `install` interattivo salva ogni risposta valida nella bozza JSON versionata
+`.azure/installer-draft.json`, relativa alla directory del progetto corrente.
+È un **file locale in chiaro, privato ed escluso da Git**: contiene lingua, ID
+tenant/sottoscrizione selezionati, nome/scelta di creazione del gruppo, regione,
+identità modello/versione/formato/SKU, capacità, nomi tecnici di chatbot,
+installazione e distribuzione, scelta Search e regole ordinate dei domini con
+policy sottodomini e avanzamento della raccolta. Non contiene credenziali,
+token, chiavi, risposte di servizi, ID di conversazioni o consensi; non legge `.env`.
+Non introduce sessioni runtime o memoria delle conversazioni.
+
+Dopo un errore o un annullamento, rieseguire lo stesso comando dalla stessa
+directory: i campi mostrano i valori precedenti tra parentesi quadre e **Invio**
+li riusa dopo convalida. Senza `--ui-language`, la lingua salvata diventa il
+predefinito del selettore; un argomento esplicito cambia solo la lingua.
+I menu confrontano gli ID con l'individuazione Azure corrente, non gli indici:
+una scelta scomparsa viene segnalata e richiede una nuova selezione.
+Cambiando tenant/sottoscrizione si eliminano i predefiniti dipendenti delle
+risorse; cambiando regione/modello si riconvalidano modello/capacità.
+Una capacità salvata fuori dai nuovi limiti viene segnalata, non corretta di nascosto.
+
+I domini vengono riproposti uno alla volta: «aggiungere un altro» propone Sì
+finché restano voci salvate, poi No. Un'interruzione non perde le voci ancora da
+rivedere; rispondere esplicitamente No tronca invece la lista. Un dominio
+modificato non eredita il Sì ai sottodomini di un dominio diverso. Le policy No
+restano No e continuano a bloccare l'installazione senza ampliare l'autorizzazione.
+**Termini Bing e conferma finale richiedono sempre un nuovo Sì esplicito.**
+
+La bozza resta dopo errori di convalida finale, provider, provisioning o package
+deployment, rifiuti, Ctrl+C/EOF; viene eliminata solo dopo la distribuzione completa
+riuscita. Un errore nella sola eliminazione produce un avviso locale, non un falso
+fallimento Azure. Errori di lettura/salvataggio fermano invece l'installer.
+Per ripartire (anche con JSON corrotto o versione non supportata):
+
+```powershell
+python -m azure_bing_assistant install --reset-wizard
+```
+
+Il comando elimina **solo** la bozza, non ambienti/configurazioni azd o login.
+Non è combinabile con `--non-interactive`/`--dry-run`. Questi percorsi, `doctor`,
+`plan`, `provision`, `deploy` e `--help` non leggono né scrivono la bozza.
+Sono recuperabili solo risposte salvate dopo questa modifica: nessun recupero
+retroattivo di una vecchia esecuzione fallita senza bozza. Riavviare manualmente
+un wizard già aperto per caricare il codice aggiornato.
+
+#### Domini, uno alla volta
+
+Dopo l'opzione Search, inserire **un solo dominio o URL HTTPS radice**. Il wizard
+convalida subito il valore, chiede esplicitamente se includere i sottodomini,
+poi se aggiungere un altro dominio. Ripete queste domande fino al No finale
+(massimo 100 domini distinti; al limite conclude il riepilogo). Valori vuoti o
+non validi vengono richiesti nuovamente. Un duplicato normalizzato non sovrascrive
+la scelta precedente: viene mostrata la policy già richiesta e occorre inserire
+un dominio diverso, oppure annullare e riavviare per cambiarla.
+
+**Limite del servizio:** `web_search.filters.allowed_domains` include sempre
+tutti i sottodomini. **Sì è l'unica policy supportata dal motore attuale.**
+No richiede «solo questo host»: il wizard conserva tale intenzione nel riepilogo
+e **blocca l'installazione prima dei termini e di qualsiasi scrittura Azure**.
+Non trasforma No in Sì, non applica filtri successivi come garanzia di blocco dei
+fetch e non attiva servizi alternativi. È quindi una raccolta esplicita della
+scelta, **non il supporto operativo dell'esclusione dei sottodomini**.
+
+Le risposte italiane accettate sono `s`, `si`, `sì`, `n`, `no` (anche `y`/`yes`
+per compatibilità). Invio usa il valore mostrato, **sempre No per termini e conferma finale**;
+una risposta sì/no non valida ripropone la stessa domanda. EOF o interruzione
+annullano senza proseguire. Il wizard già aperto va **riavviato manualmente**
+per caricare queste modifiche.
+
+Esempio del segmento domini, due domini con policy supportate:
+
+```text
+La ricerca nativa include sempre i sottodomini. È supportato solo Sì; scegliere No blocca l'installazione senza ampliare la policy richiesta. No è la scelta predefinita.
+Dominio pubblico autorizzato o URL HTTPS radice: https://Example.ORG/
+Includere anche i sottodomini di example.org? [s/N]: sì
+Vuoi aggiungere un altro dominio? [s/N]: s
+Dominio pubblico autorizzato o URL HTTPS radice: docs.example.net
+Includere anche i sottodomini di docs.example.net? [s/N]: sì
+Vuoi aggiungere un altro dominio? [s/N]: no
+Policy richieste per i domini:
+  example.org: con sottodomini
+  docs.example.net: con sottodomini
+La ricerca nativa web_search basata su Bing è limitata a questi domini, inclusi tutti i loro sottodomini; un sottodominio non autorizza il dominio padre. L'accettazione di modello/regione e i metadati delle fonti richiedono una verifica live manuale.
+Accettare costi e termini della ricerca Bing e il flusso dati al di fuori dei confini di conformità/geografici di Azure [s/N]: sì
+```
+
+Segue il piano completo e la conferma
+`Procedere con la creazione delle risorse e la distribuzione [s/N]:`.
+Solo un Sì esplicito autorizza le scritture. Esempio alternativo bloccato:
+
+```text
+Dominio pubblico autorizzato o URL HTTPS radice: example.org
+Includere anche i sottodomini di example.org? [s/N]: no
+La policy solo host per example.org non è supportata; questa scelta bloccherà l'installazione.
+Vuoi aggiungere un altro dominio? [s/N]: no
+Policy richieste per i domini:
+  example.org: solo questo host
+Installazione non riuscita (Inserimento dati e individuazione delle risorse): Policy solo host non supportate: example.org. Il filtro nativo web_search.filters.allowed_domains include sempre i sottodomini e non può rispettare queste scelte. Installazione interrotta prima dei termini o della creazione delle risorse; questo installer non ha creato risorse.
+```
+
+<a id="capacita-e-avanzamento-it"></a>
+
+La **capacità del modello** propone un valore tra parentesi quadre: premere
+**Invio** per mantenerlo o inserire un altro intero positivo. Il wizard usa il
+valore predefinito restituito da Azure; se manca, propone **10**, adattato agli
+eventuali limiti minimo e massimo dello SKU. Metadati non validi o contraddittori
+bloccano il wizard. Per gli SKU Standard è la quota iniziale per la velocità di elaborazione delle
+richieste, non il numero di utenti, una garanzia di prestazioni o un budget di
+spesa. Azure convalida la quota durante la distribuzione: il valore proposto non
+garantisce quota disponibile. Gli altri campi obbligatori e la conferma finale
+restano invariati; `--non-interactive` richiede ancora `--model-capacity` esplicito.
+
+La capacità salvata valida ha precedenza sul valore Azure: **1000 resta 1000**,
+non viene interpretato come una piccola allocazione test né come causa di un errore.
+Il valore predefinito Azure non è una raccomandazione per il carico del cliente.
+Prima della domanda, per `Standard`, `GlobalStandard`, `DataZoneStandard`:
+
+- «Esempio test/POC: 10 unità per poche interrogazioni manuali con bassa concorrenza.»
+- «Esempio produzione: 100 unità solo come punto di partenza illustrativo, non come capacità garantita.»
+
+Se i limiti SKU escludono 10 o 100, l'esempio viene dichiarato **non applicabile**,
+non sostituito con un numero fuori intervallo. Non è un limite utenti, un budget
+mensile o un costo PAYG fisso. Produzione richiede picco richieste/minuto,
+dimensione del contesto e lavoro simultaneo limitato. **Solo se** 1 unità =
+1.000 TPM e 1 RPM: 10 richieste/minuto × 6.000 token stimati per il rate limit
+richiedono `max(60, 10) = 60` unità; 25% di margine = 75; 100 offre più margine.
+Questo **non** è un rapporto attribuito al modello selezionato: stime del rate
+limit e token fatturati differiscono. Verificare rapporti modello, incrementi e
+quota disponibile; l'esempio vale solo entro i limiti SKU. Per capacità
+riservata/provisioned/PTU gli addebiti sono diversi; Batch ha quote diverse:
+seguire provider e dimensionamento dell'organizzazione, non gli esempi PAYG.
+
+**Avanzamento dopo l'approvazione:** `install` mostra cinque fasi: salvataggio
+ambiente azd; compilazione Bicep, provisioning ARM e attesa; salvataggio/lettura
+output confermati; configurazione Foundry e runtime; pacchetto e distribuzione
+app. Esempio: `Fase 2/5 · Creazione delle risorse Azure · in corso · 01:15`.
+L'indicatore TTY e il tempo trascorso segnalano attività, non percentuali,
+stato Azure verificato ad ogni animazione o tempo residuo. Su output reindirizzato:
+righe iniziali/finali e heartbeat ogni 30 secondi, senza ANSI. Tutto su stderr:
+il JSON stdout non cambia; dry-run e mancata approvazione non avviano il display.
+Una fase termina solo al ritorno dell'operazione; errori/Ctrl+C fermano il display
+e conservano la bozza. **Ctrl+C non annulla o elimina operazioni/risorse Azure**:
+possono continuare; verificare prima di riprovare.
+
+Per stato ARM terminale Failed/Canceled, l'installer conserva solo codici
+ammessi e limitati, alcuni numeri quota riconoscibili e identificatori di
+deployment. Non stampa testo provider arbitrario, parametri, header, token,
+chiavi o URL con query. Il codice esterno `ResourceDeploymentFailure` **non prova
+la causa**: leggere i dettagli nelle operazioni indicate. Esempi generici:
+
+```powershell
+az deployment operation sub list --subscription 'example-sub' --name 'chatbot-demo' --output json
+az deployment operation group list --subscription 'example-sub' --resource-group 'rg-demo' --name 'foundry' --output json
+```
+
+I comandi effettivi usano la distribuzione corrente e, se identificato nella
+risposta già ricevuta, il deployment annidato; **non vengono eseguiti automaticamente**.
+Output diagnostico manuale da controllare e oscurare prima di condividerlo.
+Timeout o stato mancante non diventano una diagnosi quota/conflitto.
+Riavviare manualmente un processo già aperto per caricare il codice aggiornato;
+con il checkout editable non occorre reinstallare.
+
+Se le operazioni riportano `FlagMustBeSetForRestore`, il nome Foundry appartiene
+a un account eliminato ma recuperabile. Un amministratore deve verificare
+l'account eliminato e ripristinarlo esplicitamente se deve essere riutilizzato:
+non eliminare definitivamente risorse per aggirare l'errore.
+Gli errori di preflight compaiono nelle operazioni della distribuzione principale;
+un deployment annidato può ancora mostrare un tentativo precedente. Confrontare
+sempre le date.
+
+Un timeout di `azd` non prova che il pacchetto sia fallito in Azure. Prima di
+rilanciare, distinguere lo stato della build/distribuzione nei log App Service
+dall'avvio del processo e dalla risposta di `/health`. L'installer non trasforma
+un timeout in successo e non ripete automaticamente il deploy.
+
+Con `azd` precedente a 1.31.2, il tracciamento dell'avvio Linux può restare in
+attesa anche dopo una build riuscita. La
+[correzione ufficiale in 1.31.2](https://github.com/Azure/azure-dev/blob/azure-dev-cli_1.31.2/cli/azd/CHANGELOG.md)
+limita l'attesa senza progressi. Per un successivo deploy necessario, è disponibile
+anche la variabile ufficiale, limitata al processo:
+
+```powershell
+$previous = $env:AZD_DEPLOY_WEB_SKIP_STATUS_CHECK
+try {
+    $env:AZD_DEPLOY_WEB_SKIP_STATUS_CHECK = 'true'
+    python -m azure_bing_assistant deploy --environment <nome-installazione> --ui-language it
+} finally {
+    $env:AZD_DEPLOY_WEB_SKIP_STATUS_CHECK = $previous
+}
+```
+
+`WEB` identifica il servizio `web` di `azure.yaml`. Questo opt-in usa il deploy
+ZIP Kudu senza il tracciamento dell'avvio Linux: non disattiva upload/build né i
+filtri dei domini. Verificare separatamente `/health` e una risposta della chat;
+la sola conclusione del comando non prova che il runtime funzioni. Un valore
+della stessa variabile nell'ambiente azd prevale su quello del processo.
 
 ### Modalità
 
@@ -106,10 +351,65 @@ configurazione non prova che esistano documenti leggibili: un amministratore
 deve caricarli fuori dalla chat e verificare l'indicizzatore. Non esistono upload
 in chat, allegati, OCR, crawler, selettori di fonti o toggle utente.
 
-`WEB_GROUNDING_SITES` e `--websites` forniscono preferenze consultive al prompt.
-Grounding with Bing Search può restituire altri domini. `--strict-websites`
-fallisce intenzionalmente perché questo installer non crea né verifica un
-percorso di filtro dominio rigoroso.
+Anche Search restituisce `url_citation`. Il deploy passa al backend gli esistenti
+`STORAGE_ACCOUNT_NAME` e `STORAGE_CONTAINER_NAME`: solo URL HTTPS di quel container
+privato, con evidenza Search completata e indice/connessione corrispondenti
+all'agente verificato, diventano riferimenti opachi `documents/...`. Con risultati
+inline l'URL deve coincidere con `results[].url`; con output separato serve il
+`call_id` della chiamata completata, anche nell'envelope `remote_function_call`
+con nome nativo Search esatto. Non si deducono relazioni dal testo libero
+dell'output. URL documentali diversi o metadati insufficienti non sono esentati
+dalla policy web. Nessun URL nelle azioni web è esentato, neppure quello del
+container. Non è una verifica live del servizio.
+
+`WEB_GROUNDING_SITES` e `--websites` configurano **domini autorizzati obbligatori**:
+domini pubblici o URL HTTPS radice, separati da virgola, massimo 100 distinti.
+Maiuscole, punto finale e IDN vengono normalizzati in hostname ASCII, mantenendo
+l'ordine ed eliminando duplicati. Ogni dominio include i sottodomini per contratto
+Azure; `www.example.org` non autorizza automaticamente `example.org`.
+Percorsi non radice, wildcard, IP, localhost/nomi locali, credenziali, porte,
+query e frammenti sono rifiutati, non ampliati silenziosamente.
+La sintassi separata da virgole resta per CLI non interattiva e variabili
+d'ambiente; significa sempre dominio **con sottodomini**, non «solo host».
+Il controllo DNS è sintattico: non esegue risoluzioni né fetch dal backend.
+`--strict-websites` è solo un alias di compatibilità: non esiste modalità web ampia.
+
+### Migrazione e verifica manuale del filtro
+
+Riavviare un wizard già aperto: il processo esistente ha caricato il vecchio codice.
+Per deployment precedenti, aggiornare i domini e usare il comando `deploy` dell'installer
+(oppure completare la nuova installazione), **non soltanto ricaricare CSS o eseguire
+`azd deploy web`**. Il post-deploy ricrea l'agente con il filtro e sincronizza i setting.
+Un vecchio agente Bing non filtrato viene rifiutato dal nuovo runtime.
+Avviare **Nuova chat** dopo ogni modifica alla policy: la cronologia remota di un
+vecchio `previousResponseId` non viene ripulita retroattivamente.
+
+Il tool è `{"type":"web_search","filters":{"allowed_domains":["example.org"]}}`,
+accanto a Search solo se configurato. Nessuna connessione Bing, chiave o risorsa
+standalone è necessaria. Il reprovisioning **incrementale non elimina** vecchie
+risorse/connessioni Bing del cliente: valutarle separatamente senza cleanup automatico.
+
+Prima di aprire il servizio agli utenti, l'operatore deve:
+1. Confermare il supporto di modello/versione/SKU/regione selezionati senza dedurlo
+   dalla sola presenza nel catalogo. Accettazione ed enforcement live sono ancora
+   da verificare, incluso `open_page`.
+2. Verificare la definizione della versione agente: solo `web_search` con lista
+   esatta `filters.allowed_domains`, più eventuale `azure_ai_search`.
+3. In una nuova chat provare domanda con fonte autorizzata, sottodominio autorizzato,
+   assenza di risultati e richieste esplicite a dominio esterno, dominio-suffisso
+   ingannevole (`example.org.evil.org`) e redirect esterno.
+4. Controllare `consultedSources` e `webSearchUsed` in `/api/chat`. Il backend richiede
+   `include=["web_search_call.action.sources"]`, controlla `action.sources`, URL
+   `open_page`/`find_in_page`, citazioni e tool restituiti. Metadati assenti, sconosciuti
+   o fuori dominio causano `503 source_policy_unverified`, non una risposta parzialmente
+   filtrata. Se il servizio non restituisce abbastanza metadati, fermarsi e verificare
+   il supporto; non rimuovere il filtro o i controlli per farlo funzionare.
+5. Provare un saluto: nessuna ricerca è necessaria (`webSearchUsed=false`); non
+   rappresentarlo come risposta grounded. Verificare separatamente i documenti opzionali.
+
+La verifica dell'evidenza è difesa aggiuntiva, non può impedire retroattivamente
+un fetch del servizio né provare tutte le affermazioni del modello. Nessuna chiamata
+Azure o inferenza live è implicita nei test offline.
 
 <a id="stima-costi-it"></a>
 
@@ -118,6 +418,11 @@ percorso di filtro dominio rigoroso.
 Questa indicazione usa prezzi pubblici Azure **Consumption in USD**, rilevati il
 **7 settembre 2026**, al netto di imposte. Contratti, sconti e crediti possono
 produrre prezzi diversi. La base confrontabile è:
+
+Il nuovo percorso nativo resta basato su Bing e soggetto ai relativi termini,
+privacy e costi. Le stime e il benchmark storico sotto non sono nuove misure del
+filtro nativo: riconfermare i meter/prezzi applicabili, senza dedurre uno SKU G1
+o una risorsa standalone dalla tabella storica.
 
 - GPT-5.4 versione `2026-03-05`, `DataZoneStandard` pay-as-you-go, richieste
   sotto 272.000 token, in Sweden Central o West Europe: **$2,75/1M token
@@ -299,8 +604,8 @@ Query Consumption riproducibili: [GPT-5.4 West Europe](https://prices.azure.com/
 I piani offline non acquisiscono credenziali né contattano Azure:
 
 ```powershell
-python -m azure_bing_assistant plan --mode off --dry-run
-python -m azure_bing_assistant plan --mode searchBlob --dry-run
+python -m azure_bing_assistant plan --mode off --websites "example.org" --dry-run
+python -m azure_bing_assistant plan --mode searchBlob --websites "example.org" --dry-run
 ```
 
 Anche `install --dry-run` è offline, quindi richiede
@@ -347,6 +652,15 @@ un gruppo esistente. Per `searchBlob` aggiungere `--mode searchBlob`,
 
 ### Configurazione installer
 
+`AZURE_ENV_NAME` (`--environment`) è il **nome breve dell’installazione**
+(es. `assistente-demo`): un nome interno per salvare la configurazione
+dell’installer e ricavare i nomi delle risorse Azure. Può essere diverso dal
+gruppo di risorse già scelto e non è il titolo della chat visibile ai visitatori.
+Usare 3–24 caratteri: lettere minuscole, cifre o trattini, iniziando con una
+lettera. Nel wizard va inserito obbligatoriamente, senza valore predefinito.
+Riutilizzarlo per gli aggiornamenti: cambiarlo può generare un insieme separato
+di risorse.
+
 | Variabile | Scopo | Default |
 |---|---|---|
 | `AZURE_ENV_NAME` | Identificatore minuscolo dell'ambiente | `chatbot-dev` |
@@ -360,7 +674,7 @@ un gruppo esistente. Per `searchBlob` aggiungere `--mode searchBlob`,
 | `MODEL_DEPLOYMENT_NAME` | Nome deployment di inferenza | nessuno |
 | `CHATBOT_NAME` | Identificatore chatbot minuscolo | nessuno |
 | `UI_LANGUAGE` | Lingua completa dell'interfaccia: `it` o `en` | `it` |
-| `WEB_GROUNDING_SITES` | Siti HTTPS consultivi separati da virgola | nessuno |
+| `WEB_GROUNDING_SITES` | Domini autorizzati separati da virgola (obbligatori, inclusi sottodomini) | nessuno |
 | `BING_TERMS_ACCEPTED` | Accettazione esplicita | `false` |
 | `FOUNDRY_USER_ROLE_DEFINITION_ID` | Input installer: Role ID runtime Foundry completo | nessuno |
 | `STORAGE_BLOB_DATA_READER_ROLE_DEFINITION_ID` | Role ID Blob opzionale | nessuno |
@@ -382,7 +696,7 @@ vengono cancellati automaticamente.
 - Un `deploy` standalone risolve `CHATBOT_NAME`, `WEB_GROUNDING_SITES`,
   `KNOWLEDGE_MODE` e `UI_LANGUAGE` nell'ordine: configurazione esplicita del
   processo/CLI, valori persistiti nell'ambiente azd, poi default sicuri
-  (`assistant`, vuoto, `off`, `it`). Omettere `--mode` conserva il valore
+  (`assistant`, nessun default per i domini obbligatori, `off`, `it`). Omettere `--mode` conserva il valore
   persistito; specificare `--mode off` disattiva solo Search.
 - `python -m azure_bing_assistant deploy` convalida gli output, riconfigura gli
   strumenti Foundry, sincronizza solo quei quattro setting App Service e infine
@@ -1051,6 +1365,16 @@ visitor access and remain required.
   Data Reader, and Search Index Data Reader roles when applicable.
 - `az` and `azd` sessions using an authorized account in the same tenant.
 
+The installing identity also needs **Foundry User** (or equivalent data-plane
+permissions, including agent write) on the Foundry project. **Owner** or
+**Contributor** alone do not grant these permissions. The role assigned to the
+application's managed identity does not authorize the installer.
+For a new project, an administrator can grant access at an appropriate parent
+scope before installation, or at project scope after resource provisioning.
+Allow RBAC assignments to propagate, which can take several minutes, then resume
+with `python -m azure_bing_assistant deploy --environment <installation-name> --ui-language en`.
+This command reuses saved outputs without reprovisioning infrastructure.
+
 Model names, versions, SKUs, capacities, subscriptions, and role definition IDs
 in examples are not validated values. Replace them with real target-tenant
 values. Azure remains authoritative for regional availability, quota, and
@@ -1098,16 +1422,243 @@ The wizard:
 
 1. reads enabled subscriptions, resource groups, regions,
    model/version/format/SKU combinations, and roles from Azure;
-2. asks for names, capacity, and preferred HTTPS sites;
-3. defaults to **Bing web chat** and asks whether to add Blob Storage and Azure
+2. asks for names, capacity, and required authorized public domains;
+3. defaults to **Authorized websites** and asks whether to add Blob Storage and Azure
    AI Search;
 4. requires acknowledgement of Bing costs, terms, and data flow;
 5. shows a plan and asks before making changes.
 
-The wizard asks for the interface language and defaults to **Italiano** when
-Enter is pressed. `--ui-language it|en` can preselect it on the interactive
-command. Other `--ui-*` custom-copy arguments are processed only with
+On the first run, the initial bilingual picker defaults to **Italiano** on Enter. The selected
+language controls both the chatbot and all installer questions, guidance,
+summaries and confirmations. `--ui-language it|en` skips the picker and preselects
+the language in interactive mode. Azure names, SKUs, region identifiers, JSON
+keys and technical provider diagnostics remain unchanged; provider failures
+include localized stage context.
+Other `--ui-*` custom-copy arguments are processed only with
 `--non-interactive`.
+
+Each question first shows its format, limits, and default (if any). Invalid input
+repeats **only that field**, keeping earlier answers in memory without repeating
+completed Azure discovery. Chatbot and installation technical names require
+**3–24 lowercase letters, digits or hyphens, starting with a letter**; they are
+not automatically corrected. Public labels can contain spaces and are configured
+separately through `UI_*` fields. Resource groups accept 1–90 ASCII letters,
+digits, periods, underscores, parentheses or hyphens. The deployment name
+identifies the model route on the endpoint, not its catalog name: 1–128 ASCII
+letters, digits, periods, underscores or hyphens, starting with a letter or digit
+(e.g. `chat-model`). These are local checks: Azure existence, permissions, quota,
+and compatibility still require service validation.
+
+Immediate correction example (excerpt):
+
+```text
+Chatbot technical name: Example University
+Chatbot technical name must be 3-24 lowercase letters, digits, or hyphens and start with a letter
+Chatbot technical name: assistant-demo
+```
+
+Invalid menu numbers repeat the same choice; Enter selects the proposed language
+in the first menu. Other menus have a default only when a saved choice is still
+available. Invalid capacity repeats only that question, without silently
+substituting the default. Enter accepts the displayed yes/no default;
+terms and final approval **always default to No**. Declining either stops installation.
+Ctrl+C/EOF cancels even during a correction. Invalid non-interactive arguments
+still fail once, without prompting. Manually restart an already running wizard;
+an editable installation does not require reinstalling the package.
+
+#### Resuming installer answers
+
+Only interactive `install` saves each valid answer in the versioned JSON draft
+`.azure/installer-draft.json`, relative to the current project directory.
+This is a **private local plaintext file, excluded from Git**. It contains language,
+selected tenant/subscription IDs, resource-group name/create choice, region,
+model/version/format/SKU identity, capacity, technical chatbot/installation/deployment
+names, optional Search choice and ordered domain/subdomain rules with collection
+progress. It contains no credentials, tokens, keys, service outputs, conversation
+IDs or consents, and does not read `.env`. It does not add runtime chat sessions
+or conversation storage.
+
+After failure or cancellation, rerun the same command from the same directory.
+Fields show previous values in brackets; **Enter** reuses them after validation.
+Without `--ui-language`, the saved language becomes the picker's default; an
+explicit argument overrides only language. Menus match stable IDs against current
+Azure discovery, not numeric positions. Removed choices are explained and require
+a fresh selection. Changing tenant/subscription clears dependent resource defaults;
+changing region/model revalidates model/capacity. An out-of-range saved capacity
+is explained, never silently clamped.
+
+Domains repeat individually: “add another” defaults to Yes while saved entries
+remain, then No. An interrupted review retains unvisited entries; an explicit No
+truncates the remaining list. An edited domain does not inherit another domain's
+Yes to subdomains. Saved No policies remain No and still block installation,
+without broadening authorization. **Bing terms and final approval always require
+a fresh explicit Yes.**
+
+The draft survives final configuration, provider, provisioning or package
+deployment failures, refusals and Ctrl+C/EOF. It is cleared only after successful
+full application deployment. Cleanup-only failure produces a local warning, not
+a false Azure deployment failure; read/save failures stop the installer.
+To start again, including after corrupt JSON or an unsupported version:
+
+```powershell
+python -m azure_bing_assistant install --reset-wizard
+```
+
+This removes **only** the draft, not azd environments/configuration or sign-ins.
+It cannot be combined with `--non-interactive`/`--dry-run`. Those paths, `doctor`,
+`plan`, `provision`, `deploy` and `--help` do not read or write the draft.
+Only answers saved after this change can persist: an older failed invocation
+without a draft cannot be recovered retrospectively. Manually restart an already
+open wizard to load the updated code.
+
+#### Domains, one at a time
+
+After the Search option, enter **one domain or root HTTPS URL**. The wizard
+validates it immediately, explicitly asks whether to include subdomains, then
+whether to add another domain. It repeats until the final No (at most 100 distinct
+domains; the limit completes the summary). Empty or invalid entries are requested
+again. A canonical duplicate never overwrites the previous choice: its requested
+policy is displayed and you must enter a different domain, or cancel and restart
+to change that policy.
+
+**Service limitation:** `web_search.filters.allowed_domains` always includes
+all descendants. **Yes is the only policy supported by the current engine.**
+No means “only this host”: the wizard retains that intent in the summary and
+**blocks installation before terms or any Azure writes**. It never converts No
+to Yes, claims a response filter prevents remote fetches, or enables alternative
+services. This implements explicit choice collection, **not operational
+subdomain exclusion**.
+
+English answers accept `y`, `yes`, `n`, `no`. Enter accepts the displayed default,
+**always No for terms and final approval**; an invalid yes/no answer repeats the same question. EOF or
+interruption cancels without continuing. **Manually restart** an already open
+wizard to load these changes.
+
+Example domain segment with two supported policies:
+
+```text
+Native search always includes subdomains. Only Yes is supported; choosing No blocks installation without broadening your policy. No is the default.
+Authorized public domain or root HTTPS URL: https://Example.ORG/
+Include subdomains of example.org? [y/N]: yes
+Add another domain? [y/N]: y
+Authorized public domain or root HTTPS URL: docs.example.net
+Include subdomains of docs.example.net? [y/N]: yes
+Add another domain? [y/N]: no
+Requested domain policies:
+  example.org: with subdomains
+  docs.example.net: with subdomains
+Native Bing-backed web_search is restricted to these domains, including all their subdomains; a subdomain does not authorize its parent. Model/region acceptance and source metadata require manual live verification.
+Accept Bing grounding cost, terms, and data flow outside Azure compliance/Geo boundaries [y/N]: yes
+```
+
+The full plan follows, then
+`Proceed with provisioning and deployment [y/N]:`.
+Only an explicit Yes authorizes writes. An alternative blocked example:
+
+```text
+Authorized public domain or root HTTPS URL: example.org
+Include subdomains of example.org? [y/N]: no
+Host-only policy for example.org is unsupported; this choice will block installation.
+Add another domain? [y/N]: no
+Requested domain policies:
+  example.org: only this host
+Installation failed (Input and discovery): Unsupported host-only policies: example.org. Native web_search.filters.allowed_domains always includes descendants and cannot honor these choices. Installation stopped before terms or provisioning; no resources were created by this installer.
+```
+
+<a id="capacity-and-progress-en"></a>
+
+**Model capacity** shows a value in square brackets: press **Enter** to keep it
+or enter another positive integer. The wizard uses Azure's returned default;
+if absent, it proposes **10**, adjusted to any SKU minimum and maximum bounds.
+Invalid or contradictory metadata stops the wizard. For Standard SKUs this is the initial request
+throughput quota, not the number of users, guaranteed performance, or a cost
+budget. Azure validates quota at deployment: the proposed value does not
+guarantee available quota. Other required fields and the final confirmation are
+unchanged; `--non-interactive` still requires an explicit `--model-capacity`.
+
+A valid saved capacity takes precedence over Azure's default: **1000 stays 1000**,
+not described as a small test allocation or assumed to cause a failure.
+Azure's default is not a recommendation for the customer's workload.
+Before prompting, `Standard`, `GlobalStandard`, `DataZoneStandard` show:
+
+- “Test/POC example: 10 units for a few manual queries with low concurrency.”
+- “Production example: 100 units only as an illustrative starting point, not guaranteed capacity.”
+
+If SKU bounds exclude 10 or 100, that example is explicitly **not applicable**;
+no out-of-range fallback is suggested. Capacity is not maximum users, a monthly
+budget or a fixed PAYG bill. Production needs peak requests/minute, context size
+and limited simultaneous work. **Only if** 1 unit = 1,000 TPM and 1 RPM:
+10 requests/minute × 6,000 estimated rate-limit tokens/request requires
+`max(60, 10) = 60` units; 25% margin = 75; 100 provides more headroom.
+This is **not** a conversion attributed to the selected model: rate-limit
+estimates differ from billed tokens. Verify model ratios, increments and
+available quota; apply only within SKU bounds. Reserved/provisioned/PTU has
+different capacity-based charges; Batch has different quotas. Follow provider
+and organizational sizing, not the PAYG examples.
+
+**Progress after approval:** `install` shows five phases: save azd environment;
+compile Bicep, provision ARM and wait; save/read confirmed outputs; configure
+Foundry and runtime; package and deploy the app. Example:
+`Phase 2/5 · Provisioning Azure resources · in progress · 01:15`.
+TTY animation and elapsed time indicate activity, not percentages, an Azure
+state check on every frame, or remaining time. Redirected output has start/end
+lines and 30-second heartbeats, without ANSI. All progress uses stderr; stdout
+JSON stays unchanged. Dry-run or declined approval never starts the display.
+Phases end only when their operations return; failures/Ctrl+C stop the display
+and retain the draft. **Ctrl+C does not cancel/delete Azure operations/resources**:
+they may continue; check before retrying.
+
+On terminal ARM Failed/Canceled, only bounded accepted codes, a few recognized
+quota numbers and deployment identifiers are retained. Arbitrary provider prose,
+parameters, headers, tokens, keys or URLs with queries are not printed.
+An outer `ResourceDeploymentFailure` **does not establish the cause**: read
+the indicated deployment operation details. Generic examples:
+
+```powershell
+az deployment operation sub list --subscription 'example-sub' --name 'chatbot-demo' --output json
+az deployment operation group list --subscription 'example-sub' --resource-group 'rg-demo' --name 'foundry' --output json
+```
+
+Actual commands target the current deployment and any nested deployment
+identified in the response already received; **they are never run automatically**.
+Review/redact manual diagnostic output before sharing it. Missing state or
+timeout is not reinterpreted as a quota/conflict diagnosis.
+Manually restart an already running process to load the update; no reinstall
+is needed for the editable checkout.
+
+If operations report `FlagMustBeSetForRestore`, the Foundry name belongs to a
+soft-deleted, recoverable account. An administrator must inspect the deleted
+account and explicitly recover it if it should be reused; do not purge resources
+to work around the error. Preflight errors appear in the parent deployment's
+operations, while a nested deployment may still show an earlier attempt.
+Always compare timestamps.
+
+An `azd` timeout does not prove that the package failed in Azure. Before retrying,
+distinguish App Service build/deployment log status from process startup and
+the `/health` response. The installer neither treats a timeout as success nor
+automatically repeats deployment.
+
+In `azd` versions before 1.31.2, Linux startup tracking can remain pending after
+a successful build. The
+[official 1.31.2 fix](https://github.com/Azure/azure-dev/blob/azure-dev-cli_1.31.2/cli/azd/CHANGELOG.md)
+bounds waits without status progress. For the next necessary deployment, the
+documented process-local setting is also available:
+
+```powershell
+$previous = $env:AZD_DEPLOY_WEB_SKIP_STATUS_CHECK
+try {
+    $env:AZD_DEPLOY_WEB_SKIP_STATUS_CHECK = 'true'
+    python -m azure_bing_assistant deploy --environment <installation-name> --ui-language en
+} finally {
+    $env:AZD_DEPLOY_WEB_SKIP_STATUS_CHECK = $previous
+}
+```
+
+`WEB` identifies the `web` service in `azure.yaml`. This opt-in uses Kudu ZIP
+deployment without Linux startup tracking; it does not disable upload/build or
+domain filters. Independently check `/health` and a chat response: command
+completion alone does not establish runtime health. The same variable in the
+azd environment takes precedence over the process value.
 
 ### Modes
 
@@ -1121,10 +1672,61 @@ configuration is not proof that readable documents exist: an administrator
 must upload them outside chat and verify the indexer. There is no chat upload,
 attachment, OCR, crawler, source picker, or user mode toggle.
 
-`WEB_GROUNDING_SITES` and `--websites` provide advisory prompt preferences.
-Grounding with Bing Search may return other domains. `--strict-websites`
-intentionally fails because this installer does not create or verify a strict
-domain-filtering path.
+Search also emits `url_citation`. Deployment passes the existing
+`STORAGE_ACCOUNT_NAME` and `STORAGE_CONTAINER_NAME` to the backend. Only HTTPS
+URLs in that exact private Blob container with completed Search evidence and
+the verified agent's index/connection become opaque `documents/...` references.
+Inline results require an exact `results[].url` match; separate outputs require
+the completed call's `call_id`, including `remote_function_call` envelopes with
+the exact native Search name. Free-text output is not parsed for provenance.
+Other document URLs or insufficient metadata receive no web-policy exemption.
+Private container URLs appearing in web actions fail closed rather than exposing
+them in `consultedSources`, even if their host was also web-allowed. This is not
+live service verification.
+
+`WEB_GROUNDING_SITES` and `--websites` configure **required authorized domains**:
+comma-separated public domains or root HTTPS URLs, up to 100 distinct entries.
+Case, trailing dots and IDNs normalize to ASCII hostnames with stable deduplication.
+Azure includes subdomains; `www.example.org` does not implicitly authorize `example.org`.
+Non-root paths, wildcards, IPs, localhost/local names, credentials, ports, query and
+fragment are rejected, never silently broadened. DNS validation is syntactic, not
+a backend resolver/fetcher. Comma-separated syntax remains for non-interactive CLI
+and environment variables; it always means domain **with subdomains**, not
+host-only. `--strict-websites` is a compatibility alias; no broad mode exists.
+
+### Migration and manual filter verification
+
+Restart any running wizard: it loaded the old code. For existing deployments,
+update domains and run the installer's `deploy` command (or finish a fresh install),
+**not just a CSS reload or `azd deploy web`**. Post-deploy recreates the filtered
+agent and synchronizes settings. Runtime rejects an old unfiltered Bing agent.
+Start **New chat** after every source-policy change: old `previousResponseId`
+history is not retroactively cleaned.
+
+The tool is `{"type":"web_search","filters":{"allowed_domains":["example.org"]}}`,
+alongside Search only when configured. No standalone Bing resource, connection,
+key or `BING_CONNECTION_NAME` output is required. **Incremental reprovisioning
+does not delete existing customer Bing resources/connections**; review them separately.
+
+Before exposing the service, the operator must:
+1. Confirm support for the selected model/version/SKU/region; catalog availability
+   is insufficient. Live acceptance and enforcement, including `open_page`, remain pending.
+2. Inspect the returned agent version: exactly filtered `web_search` with matching
+   `filters.allowed_domains`, plus optional `azure_ai_search`.
+3. Start a new chat and test an authorized source, its subdomain, no results,
+   explicit external-domain requests, deceptive suffixes (`example.org.evil.org`)
+   and an externally redirected URL.
+4. Inspect `/api/chat` fields `consultedSources` and `webSearchUsed`. Runtime requests
+   `include=["web_search_call.action.sources"]` and checks `action.sources`,
+   `open_page`/`find_in_page` URLs, citations and returned tools. Missing, unknown
+   or outside-domain evidence yields `503 source_policy_unverified`, not a partially
+   filtered answer. If the service supplies insufficient metadata, stop and verify
+   support; do not remove filters or checks.
+5. Test a greeting without retrieval (`webSearchUsed=false`), without calling it
+   grounded. Verify optional document retrieval independently.
+
+Evidence checks are defense in depth: they cannot retroactively prevent a service
+fetch or prove every model statement. Offline tests make no Azure or live inference calls.
 
 <a id="cost-estimate-en"></a>
 
@@ -1133,6 +1735,11 @@ domain-filtering path.
 This indication uses public Azure **USD Consumption prices**, retrieved on
 **September 7, 2026**, before tax. Agreements, discounts, and credits can produce
 different prices. Its comparable basis is:
+
+Native filtered search remains Bing-backed and subject to Bing terms, privacy
+and charges. Estimates and the historical benchmark below are not new measurements
+of native filtering: reconfirm applicable meters/pricing without inferring a G1 SKU
+or standalone resource from the historical table.
 
 - GPT-5.4 version `2026-03-05`, `DataZoneStandard` pay-as-you-go, requests below
   272,000 tokens, in Sweden Central or West Europe: **$2.75/1M input tokens**
@@ -1313,8 +1920,8 @@ Reproducible Consumption queries: [GPT-5.4 West Europe](https://prices.azure.com
 Offline plans acquire no credentials and contact no Azure service:
 
 ```powershell
-python -m azure_bing_assistant plan --mode off --dry-run
-python -m azure_bing_assistant plan --mode searchBlob --dry-run
+python -m azure_bing_assistant plan --mode off --websites "example.org" --dry-run
+python -m azure_bing_assistant plan --mode searchBlob --websites "example.org" --dry-run
 ```
 
 `install --dry-run` is also offline, so it requires `--non-interactive` and all
@@ -1360,6 +1967,14 @@ existing group. For `searchBlob`, add `--mode searchBlob`,
 
 ### Installer configuration
 
+`AZURE_ENV_NAME` (`--environment`) is the **short installation name**
+(e.g. `assistant-demo`): an internal name used to save the installer
+configuration and derive Azure resource names. It can differ from the
+resource-group name already chosen and is not the chat title visitors see.
+Use 3–24 lowercase letters, digits or hyphens, starting with a letter.
+The wizard requires manual entry, with no default. Reuse this name for updates:
+changing it can generate a separate set of resources.
+
 | Variable | Purpose | Default |
 |---|---|---|
 | `AZURE_ENV_NAME` | Lowercase environment identifier | `chatbot-dev` |
@@ -1373,7 +1988,7 @@ existing group. For `searchBlob`, add `--mode searchBlob`,
 | `MODEL_DEPLOYMENT_NAME` | Inference deployment name | none |
 | `CHATBOT_NAME` | Lowercase chatbot identifier | none |
 | `UI_LANGUAGE` | Complete interface language: `it` or `en` | `it` |
-| `WEB_GROUNDING_SITES` | Comma-separated advisory HTTPS sites | none |
+| `WEB_GROUNDING_SITES` | Required comma-separated authorized domains (includes subdomains) | none |
 | `BING_TERMS_ACCEPTED` | Explicit acknowledgement | `false` |
 | `FOUNDRY_USER_ROLE_DEFINITION_ID` | Installer input: full Foundry runtime role ID | none |
 | `STORAGE_BLOB_DATA_READER_ROLE_DEFINITION_ID` | Optional Blob role ID | none |
@@ -1395,7 +2010,7 @@ not automatically deleted.
 - Standalone `deploy` resolves `CHATBOT_NAME`, `WEB_GROUNDING_SITES`,
   `KNOWLEDGE_MODE`, and `UI_LANGUAGE` in this order: explicit process/CLI
   configuration, persisted azd environment values, then safe defaults
-  (`assistant`, empty, `off`, `it`). Omitting `--mode` preserves persisted mode;
+  (`assistant`, no default for required domains, `off`, `it`). Omitting `--mode` preserves persisted mode;
   `--mode off` disables only Search.
 - `python -m azure_bing_assistant deploy` validates outputs, reconfigures
   Foundry tools, synchronizes only those four App Service settings, and then

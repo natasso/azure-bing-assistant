@@ -63,6 +63,8 @@ def test_first_turn_omits_previous_id_and_returns_next_id():
         "message": "Answer: Question",
         "citations": [{"label": "Documento 1", "reference": response.json()["citations"][0]["reference"]}],
         "previousResponseId": "response-1",
+        "consultedSources": [],
+        "webSearchUsed": False,
     }
     assert agent.calls == [("Question", None)]
 
@@ -215,15 +217,19 @@ def test_unconfigured_timeout_and_configured_adapter_paths(monkeypatch):
     captured = {}
 
     class RuntimeAgent(FakeAgent):
-        def __init__(self, endpoint, agent_name, timeout_seconds):
+        def __init__(self, endpoint, agent_name, timeout_seconds, allowed_domains, search_enabled, document_source):
             super().__init__()
             captured.update(endpoint=endpoint, agent_name=agent_name, timeout=timeout_seconds)
+            assert allowed_domains == ("example.org",)
+            assert search_enabled is False
+            assert document_source is None
 
     monkeypatch.setattr(backend_main, "FoundryAgentAdapter", RuntimeAgent)
     settings = AppSettings(
         environment="test",
         foundry_project_endpoint="https://example.services.ai.azure.com/api/projects/project",
         chatbot_name="generic-assistant",
+        allowed_domains=("example.org",),
     )
     with TestClient(create_app(settings)) as client:
         assert client.post("/api/chat", json={"message": "Question"}).status_code == 200
@@ -313,7 +319,7 @@ def test_config_reports_bing_baseline_and_optional_document_mode(mode):
 
     assert config["knowledgeMode"] == mode
     assert config["welcomeSubtitle"] == (
-        "Fai una domanda sulle informazioni aggiornate disponibili sul web."
+        "Fai una domanda sulle informazioni disponibili nei siti autorizzati."
     )
     assert "document" not in config["welcomeSubtitle"].lower()
 

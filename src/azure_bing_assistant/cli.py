@@ -9,9 +9,10 @@ import re
 import shutil
 import subprocess
 import sys
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from .agent import AgentToolOrchestrator, FoundrySdkWriter
@@ -26,9 +27,15 @@ from .config import (
     validate_websites,
 )
 from .ingestion import document_upload_guidance
-from .provision import AzureProvisioner, ProvisioningError, provision_argv
+from .installer_messages import InstallerMessageError, InstallerMessages
+from .install_progress import InstallProgress
+from .provision import AzureProvisioner, DeploymentFailedError, ProvisioningError, provision_argv
 from .search_blob import AzureRestClient, SearchBlobOrchestrator, SearchBlobSettings
-from .wizard import AzureCliDiscovery, CapabilityError, ConsolePrompts, DiscoveryError, run_wizard
+from .wizard import (
+    AzureCliDiscovery, CapabilityError, ConsolePrompts, DiscoveryError,
+    WizardCancelled, run_wizard,
+)
+from .wizard_draft import WizardDraft, WizardDraftError
 
 _DEFAULT_AGENT_NAME = "assistant"
 _WEB_APP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{1,59}$")
@@ -98,6 +105,7 @@ def _commands(config: InstallerConfig, action: str) -> list[list[str]]:
 
 
 def _plan(config: InstallerConfig) -> int:
+    validate_websites(config.websites)
     search_configured = config.knowledge_mode is KnowledgeMode.SEARCH_BLOB
     payload = {
         "command": "plan",
@@ -120,16 +128,16 @@ def _plan(config: InstallerConfig) -> int:
             "parameters": "non-secret in-memory request body",
         },
         "postDeploy": {
-            "attachBingGrounding": True,
-            "websiteEnforcement": "advisory",
+            "attachFilteredWebSearch": True,
+            "websiteEnforcement": "allowed_domains",
             "attachSearchTool": search_configured,
             "configureBlobIndexer": search_configured,
         },
         "userExperience": {
             "label": (
-                "Bing + your documents (Azure AI Search, optional)"
+                "Authorized websites + documents (Azure AI Search, optional)"
                 if search_configured
-                else "Bing web chat (default)"
+                else "Authorized websites (default)"
             ),
             "bingGroundingConfigured": True,
             "documentSearchConfigured": search_configured,
@@ -139,6 +147,38 @@ def _plan(config: InstallerConfig) -> int:
     return 0
 
 
+def _interactive_plan(config: InstallerConfig, prompts: ConsolePrompts) -> None:
+    validate_websites(config.websites)
+    tr = prompts.messages
+    prompts.output(tr("Installation plan (no changes yet):"))
+    rows = (
+        ("Subscription", config.subscription_id),
+        ("Resource group", config.resource_group_name),
+        ("Create resource group", tr("Yes" if config.create_resource_group else "No")),
+        ("Installation name", config.environment_name),
+        ("Region", config.location),
+        ("Model / version / format / SKU", " / ".join((
+            config.model_name or "", config.model_version or "",
+            config.model_format or "", config.model_sku or "",
+        ))),
+        ("Model capacity", config.model_capacity),
+        ("Model deployment name", config.model_deployment_name),
+        ("Chatbot name", config.chatbot_name),
+        ("Chatbot / installer language", config.ui_language),
+        ("Optional document search", tr("Yes" if config.knowledge_mode is KnowledgeMode.SEARCH_BLOB else "No")),
+    )
+    for label, value in rows:
+        prompts.output(f"  {tr(label)}: {value}")
+    prompts.output(tr("Requested domain policies:"))
+    for domain in config.websites:
+        prompts.output(f"  {domain}: {tr('with subdomains')}")
+    prompts.output(tr(
+        "Changes after approval: save azd environment, provision Azure resources and roles, "
+        "configure filtered web_search and optional document search, synchronize settings, "
+        "deploy the application."
+    ))
+
+
 def _required_environment(
     name: str,
     values: Mapping[str, object] | None = None,
@@ -146,7 +186,7 @@ def _required_environment(
     source = os.environ if values is None else values
     value = source.get(name)
     if not isinstance(value, str) or not value.strip():
-        raise ConfigurationError(f"{name} is required for post-deploy setup")
+        raise ConfigurationError("{name} is required for post-deploy setup", name=name)
     return value
 
 
@@ -154,7 +194,6 @@ def _required_environment(
 class ResolvedDeployConfig:
     config: InstallerConfig
     foundry_project_endpoint: str
-    bing_connection_name: str
     web_app_name: str
     search_endpoint: str | None = None
     search_index_name: str | None = None
@@ -174,6 +213,10 @@ class ResolvedDeployConfig:
             "WEB_GROUNDING_SITES": ",".join(self.config.websites),
             "KNOWLEDGE_MODE": self.config.knowledge_mode.value,
             "UI_LANGUAGE": self.config.ui_language or DEFAULT_UI_LANGUAGE,
+            **({
+                "STORAGE_ACCOUNT_NAME": self.storage_account_name or "",
+                "STORAGE_CONTAINER_NAME": self.storage_container_name or "",
+            } if self.config.knowledge_mode is KnowledgeMode.SEARCH_BLOB else {}),
         }
 
 
@@ -289,7 +332,7 @@ def _validate_search_prerequisites(
     ):
         if not _SEARCH_ARTIFACT_NAME.fullmatch(values[field_name] or ""):
             raise ConfigurationError(
-                f"{dict(_SEARCH_DEPLOYMENT_FIELDS)[field_name]} is invalid"
+                "{name} is invalid", name=dict(_SEARCH_DEPLOYMENT_FIELDS)[field_name],
             )
     if not _AZURE_RESOURCE_NAME.fullmatch(values["search_connection_name"] or ""):
         raise ConfigurationError("SEARCH_CONNECTION_NAME is invalid")
@@ -340,6 +383,7 @@ def _resolve_deploy_config(
     websites = config.websites
     if not websites:
         websites = _persisted_websites(persisted.get("WEB_GROUNDING_SITES"))
+    websites = validate_websites(websites)
 
     model_deployment_name = config.model_deployment_name or _required_environment(
         "MODEL_DEPLOYMENT_NAME", persisted
@@ -380,13 +424,9 @@ def _resolve_deploy_config(
     foundry_project_endpoint = _validate_foundry_endpoint(
         _required_environment("FOUNDRY_PROJECT_ENDPOINT", persisted)
     )
-    bing_connection_name = _required_environment("BING_CONNECTION_NAME", persisted)
-    if not _AZURE_RESOURCE_NAME.fullmatch(bing_connection_name):
-        raise ConfigurationError("BING_CONNECTION_NAME is invalid")
     return ResolvedDeployConfig(
         config=effective,
         foundry_project_endpoint=foundry_project_endpoint,
-        bing_connection_name=bing_connection_name,
         web_app_name=web_app_name,
         **search_values,
     )
@@ -431,18 +471,19 @@ def _configure_post_deploy(
             foundry_writer,
             agent_name=config.chatbot_name or _DEFAULT_AGENT_NAME,
         ).configure_tools(
-            bing_connection_name=resolved.bing_connection_name,
-            advisory_sites=config.websites,
+            allowed_domains=config.websites,
             search_index_name=search_index,
             search_connection_name=search_connection,
         )
         if config.knowledge_mode is KnowledgeMode.SEARCH_BLOB:
+            tr = InstallerMessages(config.ui_language or DEFAULT_UI_LANGUAGE)
             print(
-                document_upload_guidance(
+                "\n".join(tr(line) for line in document_upload_guidance(
                     config.resource_group_name or f"rg-{config.environment_name}",
                     resolved.storage_account_name or "",
                     resolved.storage_container_name or "",
-                )
+                ).splitlines()),
+                file=sys.stderr,
             )
 
 
@@ -459,62 +500,68 @@ def _deploy_application(
     runner: AzdRunner,
     config: InstallerConfig,
     deployment_values: Mapping[str, object],
+    *,
+    phase: Callable[[str], AbstractContextManager] = lambda _label: nullcontext(),
 ) -> ResolvedDeployConfig:
-    resolved = _resolve_deploy_config(config, deployment_values)
-    _configure_post_deploy(resolved)
-    try:
-        _sync_app_service_settings(resolved, str(Path.cwd()))
-    except (AzdError, ValueError) as exc:
-        raise AzdError(
-            "Foundry configuration succeeded, but App Service settings could not be "
-            "updated; the application package was not deployed"
-        ) from exc
-
-    persisted_updates = {
-        name: value
-        for name, value in resolved.app_settings.items()
-        if deployment_values.get(name) != value
-    }
-    if persisted_updates:
+    with phase("Configuring Foundry and application settings"):
+        resolved = _resolve_deploy_config(config, deployment_values)
+        _configure_post_deploy(resolved)
         try:
-            _save_deployment_outputs(
-                runner,
-                resolved.config.environment_name,
-                persisted_updates,
+            _sync_app_service_settings(resolved, str(Path.cwd()))
+        except (AzdError, ValueError) as exc:
+            raise AzdError(
+                "Foundry configuration succeeded, but App Service settings could not be "
+                "updated; the application package was not deployed"
+            ) from exc
+
+        persisted_updates = {
+            name: value
+            for name, value in resolved.app_settings.items()
+            if deployment_values.get(name) != value
+        }
+        if persisted_updates:
+            try:
+                _save_deployment_outputs(
+                    runner,
+                    resolved.config.environment_name,
+                    persisted_updates,
+                )
+            except AzdError as exc:
+                raise AzdError(
+                    "Foundry and App Service settings are valid, but the resolved "
+                    "deployment values could not be fully persisted; the azd environment "
+                    "may be partially updated and the application package was not deployed"
+                ) from exc
+    with phase("Packaging and deploying the application"):
+        try:
+            runner.run(
+                [
+                    "azd",
+                    "deploy",
+                    "web",
+                    "--environment",
+                    resolved.config.environment_name,
+                    "--no-prompt",
+                ]
             )
         except AzdError as exc:
             raise AzdError(
-                "Foundry and App Service settings are valid, but the resolved "
-                "deployment values could not be fully persisted; the azd environment "
-                "may be partially updated and the application package was not deployed"
+                "Foundry and App Service settings are valid, but application package "
+                "deployment was not confirmed. Azure may still be running the deployment. "
+                "Check App Service deployment logs and application health before retrying."
             ) from exc
-    try:
-        runner.run(
-            [
-                "azd",
-                "deploy",
-                "web",
-                "--environment",
-                resolved.config.environment_name,
-                "--no-prompt",
-            ]
-        )
-    except AzdError as exc:
-        raise AzdError(
-            "Foundry and App Service settings are valid, but application package "
-            "deployment failed"
-        ) from exc
     return resolved
 
 
-def _add_install_arguments(parser: argparse.ArgumentParser) -> None:
+def _add_install_arguments(parser: argparse.ArgumentParser, language: str = "en") -> None:
+    tr = InstallerMessages(language)
     parser.add_argument("--non-interactive", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--mode",
         choices=[mode.value for mode in KnowledgeMode],
-        help=(
-            "off: Bing web chat (default); searchBlob: Bing plus optional "
+        help=tr(
+            "off: authorized websites (default); searchBlob: authorized websites plus optional "
             "administrator-managed documents"
         ),
     )
@@ -537,7 +584,7 @@ def _add_install_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--ui-language",
         choices=("it", "en"),
-        help="application interface language (default: it)",
+        help=tr("chatbot and installer language (default: it)"),
     )
     parser.add_argument("--ui-product-name")
     parser.add_argument("--ui-organization-name")
@@ -549,15 +596,18 @@ def _add_install_arguments(parser: argparse.ArgumentParser) -> None:
         "--ui-suggestion",
         action="append",
         dest="ui_suggestions",
-        help="suggested question; repeat up to five times",
+        help=tr("suggested question; repeat up to five times"),
     )
     parser.add_argument(
         "--no-ui-suggestions",
         action="store_true",
-        help="show no suggested questions",
+        help=tr("show no suggested questions"),
     )
-    parser.add_argument("--websites")
-    parser.add_argument("--strict-websites", action="store_true")
+    parser.add_argument("--websites", help=tr(
+        "required comma-separated authorized domains or root HTTPS URLs (always includes subdomains)"
+    ))
+    parser.add_argument("--strict-websites", action="store_true",
+                        help=tr("compatibility alias; domain restriction is always required"))
     parser.add_argument("--accept-bing-terms", action="store_true")
     parser.add_argument("--foundry-user-role-id")
     parser.add_argument("--storage-blob-data-reader-role-id")
@@ -566,7 +616,7 @@ def _add_install_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _noninteractive_config(args: argparse.Namespace) -> InstallerConfig:
     if args.model_capacity is None:
-        raise ConfigurationError("non-interactive install requires: model_capacity")
+        raise ConfigurationError("non-interactive install requires: {fields}", fields="model_capacity")
     if args.no_ui_suggestions and args.ui_suggestions is not None:
         raise ConfigurationError(
             "--no-ui-suggestions cannot be combined with --ui-suggestion"
@@ -634,15 +684,42 @@ def _save_deployment_outputs(
         )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+def build_parser(language: str = "en") -> argparse.ArgumentParser:
+    tr = InstallerMessages(language)
+
+    class LocalizedParser(argparse.ArgumentParser):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._optionals.title = tr("options")
+            self._positionals.title = tr("positional arguments")
+            for action in self._actions:
+                if isinstance(action, argparse._HelpAction):
+                    action.help = tr("show this help message and exit")
+
+        def error(self, message):
+            self.print_usage(sys.stderr)
+            self.exit(2, f"{self.prog}: {tr('error')}: {message}\n")
+
+    class LocalizedFormatter(argparse.HelpFormatter):
+        def _format_usage(self, usage, actions, groups, prefix):
+            return super()._format_usage(usage, actions, groups, prefix or tr("usage: "))
+
+    parser = LocalizedParser(
         prog="azure-bing-assistant",
-        description="Install and manage Azure Bing Assistant.",
+        description=tr("Install and manage Azure Bing Assistant."),
+        formatter_class=LocalizedFormatter,
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
-    subcommands.add_parser("doctor", help="check local tools and Azure authentication")
-    install = subcommands.add_parser("install", help="run the guided customer installation")
-    _add_install_arguments(install)
+    subcommands.add_parser("doctor", help=tr("check local tools and Azure authentication"))
+    install = subcommands.add_parser(
+        "install", help=tr("run the guided customer installation"),
+        formatter_class=LocalizedFormatter,
+    )
+    _add_install_arguments(install, language)
+    install.add_argument(
+        "--reset-wizard", action="store_true",
+        help=tr("discard only the local interactive installer draft and start again"),
+    )
     for command in ("plan", "provision", "deploy"):
         child = subcommands.add_parser(command)
         child.add_argument(
@@ -650,56 +727,97 @@ def build_parser() -> argparse.ArgumentParser:
             required=command != "deploy",
             choices=[mode.value for mode in KnowledgeMode],
             help=(
-                "off: Bing web chat (default); searchBlob: Bing plus optional "
+                "off: authorized websites (default); searchBlob: authorized websites plus optional "
                 "administrator-managed documents"
             ),
         )
         child.add_argument("--environment")
         child.add_argument("--location")
         child.add_argument("--ui-language", choices=("it", "en"))
+        child.add_argument("--websites", help="authorized domains or root HTTPS URLs (always includes subdomains)")
+        child.add_argument("--strict-websites", action="store_true",
+                           help="compatibility alias; domain restriction is always required")
         if command == "plan":
             child.add_argument("--dry-run", required=True, action="store_true")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    language = DEFAULT_UI_LANGUAGE if arguments[:1] == ["install"] else "en"
+    for index, argument in enumerate(arguments):
+        if argument == "--ui-language" and index + 1 < len(arguments):
+            language = arguments[index + 1]
+        elif argument.startswith("--ui-language="):
+            language = argument.partition("=")[2]
+    args = build_parser(language).parse_args(arguments)
     if args.command == "doctor":
         return _doctor()
+    prompts = None
+    draft = None
+    stage = "Input and discovery"
     try:
         if args.command == "install":
+            if args.reset_wizard and (args.non_interactive or args.dry_run):
+                raise ConfigurationError("--reset-wizard requires an interactive install without --dry-run")
             if args.dry_run and not args.non_interactive:
                 raise ConfigurationError(
                     "offline install dry-run requires --non-interactive and explicit flags"
                 )
-            prompts = None
             if args.non_interactive:
                 config = _noninteractive_config(args)
             else:
-                prompts = ConsolePrompts()
+                prompts = ConsolePrompts(language=language)
+                draft = WizardDraft(Path.cwd())
+                if args.reset_wizard:
+                    draft.clear(reset=True)
+                draft.load()
                 config = run_wizard(
                     AzureCliDiscovery(),
                     prompts,
                     ui_language=args.ui_language,
+                    draft=draft,
                 )
             if args.dry_run:
                 return _plan(config)
             if prompts is not None:
-                _plan(config)
-                if not prompts.yes_no("Proceed with provisioning and deployment"):
-                    print("Installation cancelled; Azure state was not changed.")
+                _interactive_plan(config, prompts)
+                if not prompts.yes_no(prompts.messages("Proceed with provisioning and deployment"), default=False):
+                    prompts.output(prompts.messages("Installation cancelled; Azure state was not changed."))
                     return 1
-            runner = AzdRunner(str(Path.cwd()))
-            runner.ensure_environment(config.environment_name)
-            for command in _commands(config, "provision")[:-1]:
-                runner.run(command)
-            deployment_values = AzureProvisioner(Path.cwd()).run(config)
-            _save_deployment_outputs(runner, config.environment_name, deployment_values)
+            phase_number = 0
+
+            def phase(label: str) -> InstallProgress:
+                nonlocal stage, phase_number
+                stage = label
+                phase_number += 1
+                return InstallProgress(
+                    label, phase_number, 5, config.ui_language or language,
+                )
+
+            with phase("Saving the environment"):
+                runner = AzdRunner(str(Path.cwd()))
+                runner.ensure_environment(config.environment_name)
+                for command in _commands(config, "provision")[:-1]:
+                    runner.run(command)
+            with phase("Provisioning Azure resources"):
+                deployment_values = AzureProvisioner(Path.cwd()).run(config)
+            with phase("Saving confirmed deployment outputs"):
+                _save_deployment_outputs(runner, config.environment_name, deployment_values)
+                persisted_values = runner.get_environment_values(config.environment_name)
             resolved = _deploy_application(
-                runner,
-                config,
-                runner.get_environment_values(config.environment_name),
+                runner, config, persisted_values, phase=phase,
             )
+            if prompts is not None:
+                prompts.output(prompts.messages("Installation completed."))
+            if draft is not None:
+                try:
+                    draft.clear()
+                except WizardDraftError as exc:
+                    print(prompts.messages(
+                        "Deployment succeeded, but the local installer draft could not be removed: {detail}",
+                        detail=exc,
+                    ), file=sys.stderr)
             print(
                 json.dumps(
                     {
@@ -718,10 +836,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             location=args.location,
             ui_language=args.ui_language,
         )
+        if args.websites is not None:
+            config = replace(config, websites=validate_websites(args.websites.split(",")))
         if args.command == "plan":
             return _plan(config)
         runner = AzdRunner(str(Path.cwd()))
         if args.command == "provision":
+            config.require_complete_install()
             runner.ensure_environment(config.environment_name)
             for command in _commands(config, "provision")[:-1]:
                 runner.run(command)
@@ -746,14 +867,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         return 0
+    except KeyboardInterrupt:
+        tr = prompts.messages if prompts is not None else InstallerMessages(language)
+        print(tr(
+            "Local installation interrupted. Remote operations may continue; "
+            "nothing was cancelled or deleted in Azure. Check deployment operations before retrying."
+        ) if stage != "Input and discovery" or args.command in {"provision", "deploy"} else tr(
+            "Input interrupted; installation cancelled."
+        ), file=sys.stderr)
+        return 130
+    except WizardCancelled as exc:
+        tr = prompts.messages if prompts is not None else InstallerMessages(language)
+        print(exc.render(tr.language), file=sys.stderr)
+        if stage == "Input and discovery":
+            print(tr("Installation cancelled; Azure state was not changed."), file=sys.stderr)
+        return 1
     except (
         CapabilityError,
         ConfigurationError,
         DiscoveryError,
         AzdError,
         ProvisioningError,
+        OSError,
         RuntimeError,
         ValueError,
     ) as exc:
-        print(f"error: {redact(str(exc))}", file=sys.stderr)
+        tr = prompts.messages if prompts is not None else InstallerMessages(language)
+        detail = exc.render(tr.language) if isinstance(
+            exc, (InstallerMessageError, DeploymentFailedError)
+        ) else tr(str(exc))
+        prefix = (
+            f"{tr('Installation failed')} ({tr(stage)})"
+            if args.command == "install"
+            else tr("error")
+        )
+        print(f"{prefix}: {detail if isinstance(exc, DeploymentFailedError) else redact(detail)}", file=sys.stderr)
         return 2

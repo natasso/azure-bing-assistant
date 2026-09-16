@@ -363,28 +363,27 @@ def test_search_client_rejects_cross_origin_request_path():
 def test_agent_search_tool_uses_managed_identity():
     client = RecordingClient()
     AgentToolOrchestrator(client).configure_tools(
-        "bing-connection",
+        ("example.org",),
         search_index_name="documents",
         search_connection_name="search-connection",
     )
 
     payload = client.calls[0][1]
-    assert payload["tools"][0]["type"] == "bing_grounding"
+    assert payload["tools"][0] == {"type": "web_search", "filters": {"allowed_domains": ["example.org"]}}
     assert payload["tools"][1]["authentication"] == "managedIdentity"
 
 
 def test_agent_always_has_bing_when_search_is_off():
     client = RecordingClient()
     AgentToolOrchestrator(client).configure_tools(
-        "bing-connection",
-        advisory_sites=("https://docs.example.org",),
+        ("docs.example.org",),
     )
 
     payload = client.calls[0][1]
     assert payload["tools"] == [
-        {"type": "bing_grounding", "connection": "bing-connection"}
+        {"type": "web_search", "filters": {"allowed_domains": ["docs.example.org"]}}
     ]
-    assert "advisory" in payload["instructions"]
+    assert "authorized domains" in payload["instructions"]
     assert "does not accept file uploads" in payload["instructions"]
     assert "Do not claim that Bing was used" in payload["instructions"]
     assert "Answer in the user's language" in payload["instructions"]
@@ -393,7 +392,7 @@ def test_agent_always_has_bing_when_search_is_off():
 def test_search_tool_wording_treats_indexed_documents_as_unconfirmed():
     client = RecordingClient()
     AgentToolOrchestrator(client).configure_tools(
-        "bing-connection",
+        ("example.org",),
         search_index_name="documents",
         search_connection_name="search-connection",
     )
@@ -413,7 +412,7 @@ def test_official_sdk_writer_creates_confirmed_agent_version():
     class Agents:
         def create_version(self, **kwargs):
             captured.update(kwargs)
-            return SimpleNamespace(version="1")
+            return SimpleNamespace(version="1", name=kwargs["agent_name"], definition=kwargs["definition"])
 
     writer = FoundrySdkWriter.__new__(FoundrySdkWriter)
     writer.project = SimpleNamespace(connections=Connections(), agents=Agents())
@@ -421,14 +420,14 @@ def test_official_sdk_writer_creates_confirmed_agent_version():
 
     status = writer.configure_agent(
         "assistant",
-        [{"type": "bing_grounding", "connection": "bing-connection"}],
+        [{"type": "web_search", "filters": {"allowed_domains": ["example.org"]}}],
         "Use Bing.",
     )
 
     assert status == "created"
     assert captured["agent_name"] == "assistant"
     assert captured["definition"].model == "chat-model"
-    assert type(captured["definition"].tools[0]).__name__ == "BingGroundingTool"
+    assert type(captured["definition"].tools[0]).__name__ == "WebSearchTool"
 
 
 class ClosingResource:

@@ -9,7 +9,7 @@ const UI_STRINGS = Object.freeze({
     organizationName: "Organizzazione",
     assistantName: "Assistente",
     welcomeTitle: "Come posso aiutarti?",
-    welcomeSubtitle: "Fai una domanda sulle informazioni aggiornate disponibili sul web.",
+    welcomeSubtitle: "Fai una domanda sulle informazioni disponibili nei siti autorizzati.",
     disclaimer: "Questo assistente usa l'AI. Verifica le informazioni importanti e non condividere dati sensibili.",
     suggestions: Object.freeze([
       "Che cosa puoi aiutarmi a trovare?",
@@ -30,20 +30,20 @@ const UI_STRINGS = Object.freeze({
     sendMessage: "Invia messaggio",
     composerHint: "Invio per inviare · Maiusc+Invio per andare a capo",
     availableInChat: "Disponibile in questa chat",
-    publicWebAndDocuments: "Web pubblico e ricerca nei documenti configurati",
-    publicWebWithSources: "Risposte dal web pubblico con fonti",
-    bingConfigured: "Grounding with Bing Search è configurato. Il suo utilizzo dipende dalla domanda.",
+    publicWebAndDocuments: "Siti autorizzati e ricerca nei documenti configurati",
+    publicWebWithSources: "Ricerca nei siti autorizzati",
+    bingConfigured: "Filtro domini configurato (inclusi i sottodomini). Uso e fonti sono verificati per ogni risposta. Domini: ",
     configurationStatus: "Stato della configurazione",
-    offLabel: "Chat web Bing (predefinita)",
-    offSummary: "Chiedi informazioni aggiornate disponibili sul web pubblico.",
+    offLabel: "Siti autorizzati (predefinita)",
+    offSummary: "Chiedi informazioni disponibili nei siti autorizzati.",
     offDetail: "I documenti privati non sono disponibili in questa chat.",
     offDocuments: "Servono documenti gestiti? Un amministratore può aggiungere facoltativamente Azure AI Search.",
-    offPlaceholder: "Fai una domanda sul web…",
-    searchLabel: "Bing + documenti (Azure AI Search, facoltativo)",
-    searchSummary: "Chiedi informazioni sul web pubblico e sui documenti gestiti disponibili.",
+    offPlaceholder: "Fai una domanda sui siti autorizzati…",
+    searchLabel: "Siti autorizzati + documenti (Azure AI Search, facoltativo)",
+    searchSummary: "Chiedi informazioni sui siti autorizzati e sui documenti gestiti disponibili.",
     searchDetail: "Azure AI Search è configurato. La disponibilità dei documenti dipende dall'indicizzazione amministrativa.",
     searchDocuments: "I documenti sono aggiunti e gestiti da un amministratore; questa chat non carica file.",
-    searchPlaceholder: "Fai una domanda sul web o sui documenti disponibili…",
+    searchPlaceholder: "Fai una domanda sui siti autorizzati o sui documenti disponibili…",
     configUnavailableLabel: "Configurazione non disponibile",
     configUnavailableSummary: "Non è stato possibile confermare le funzionalità della chat.",
     configUnavailableTitle: "Disponibilità della chat non verificabile",
@@ -75,6 +75,7 @@ const UI_STRINGS = Object.freeze({
     startNew: "Inizia una nuova conversazione",
     previousUnavailable: "Questa conversazione non può più continuare. Ricomincia o riprova questo messaggio come nuova conversazione.",
     requestFailed: "L'assistente non ha completato la richiesta. Riprova.",
+    sourcePolicyUnverified: "Impossibile verificare le fonti autorizzate. Chiedi all’amministratore di verificare configurazione e supporto del modello, poi inizia una nuova chat.",
     messageTooLong: "I messaggi non possono superare {maximum} caratteri.",
     dialogOpenError: "Impossibile aprire la finestra dell'assistente.",
   }),
@@ -84,7 +85,7 @@ const UI_STRINGS = Object.freeze({
     organizationName: "Organization",
     assistantName: "Assistant",
     welcomeTitle: "How can I help?",
-    welcomeSubtitle: "Ask a question about current information from the web.",
+    welcomeSubtitle: "Ask a question about information from authorized websites.",
     disclaimer: "This assistant uses AI. Verify important information and do not share sensitive data.",
     suggestions: Object.freeze([
       "What can you help me find?",
@@ -105,20 +106,20 @@ const UI_STRINGS = Object.freeze({
     sendMessage: "Send message",
     composerHint: "Enter to send · Shift+Enter for a new line",
     availableInChat: "Available in this chat",
-    publicWebAndDocuments: "Public web and configured document search",
-    publicWebWithSources: "Public web answers with sources",
-    bingConfigured: "Bing web grounding is configured. Whether it is used depends on the question.",
+    publicWebAndDocuments: "Authorized websites and configured document search",
+    publicWebWithSources: "Authorized website search",
+    bingConfigured: "Domain filter configured (including subdomains). Tool use and sources are checked for each response. Domains: ",
     configurationStatus: "Configuration status",
-    offLabel: "Bing web chat (default)",
-    offSummary: "Ask about current information from the public web.",
+    offLabel: "Authorized websites (default)",
+    offSummary: "Ask about information from authorized websites.",
     offDetail: "Private documents are not available in this chat.",
     offDocuments: "Need governed documents? An administrator can optionally add Azure AI Search.",
-    offPlaceholder: "Ask a question about the web…",
-    searchLabel: "Bing + your documents (Azure AI Search, optional)",
-    searchSummary: "Ask about the public web and available administrator-managed documents.",
+    offPlaceholder: "Ask about authorized websites…",
+    searchLabel: "Authorized websites + documents (Azure AI Search, optional)",
+    searchSummary: "Ask about authorized websites and available administrator-managed documents.",
     searchDetail: "Azure AI Search is configured. Document availability depends on administrator indexing.",
     searchDocuments: "Documents are added and managed by an administrator; this chat does not upload files.",
-    searchPlaceholder: "Ask about the web or available documents…",
+    searchPlaceholder: "Ask about authorized websites or available documents…",
     configUnavailableLabel: "Configuration unavailable",
     configUnavailableSummary: "Chat capabilities could not be confirmed.",
     configUnavailableTitle: "Chat availability unavailable",
@@ -150,6 +151,7 @@ const UI_STRINGS = Object.freeze({
     startNew: "Start new conversation",
     previousUnavailable: "This conversation can no longer be continued. Start over or retry this message as a new conversation.",
     requestFailed: "The assistant could not complete the request. Please try again.",
+    sourcePolicyUnverified: "Authorized sources could not be verified. Ask the administrator to check configuration and model support, then start a new chat.",
     messageTooLong: "Messages cannot exceed {maximum} characters.",
     dialogOpenError: "Unable to open the assistant dialog.",
   }),
@@ -234,6 +236,7 @@ function normalizeConfig(value) {
     disclaimer: normalizedText(config.disclaimer, defaults.disclaimer),
     suggestedQuestions: questions,
     knowledgeMode: config.knowledgeMode === "searchBlob" ? "searchBlob" : "off",
+    allowedDomains: Array.isArray(config.allowedDomains) ? [...config.allowedDomains] : [],
   };
 }
 
@@ -260,6 +263,16 @@ function isValidConfigPayload(value) {
       (question) => typeof question === "string" && question.trim(),
     )
     && (value.knowledgeMode === "off" || value.knowledgeMode === "searchBlob")
+    && value.websiteEnforcement === "allowed_domains"
+    && value.includesSubdomains === true
+    && Array.isArray(value.allowedDomains)
+    && value.allowedDomains.length > 0
+    && value.allowedDomains.length <= 100
+    && value.allowedDomains.every(
+      (domain) => typeof domain === "string"
+        && domain.length <= 253
+        && /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]*$/.test(domain),
+    )
   );
 }
 
@@ -699,7 +712,7 @@ if (typeof document !== "undefined") {
     elements.capabilityTitle.textContent = state.knowledgeMode === "searchBlob"
       ? strings.publicWebAndDocuments
       : strings.publicWebWithSources;
-    elements.capabilityDescription.textContent = strings.bingConfigured;
+    elements.capabilityDescription.textContent = strings.bingConfigured + state.config.allowedDomains.join(", ");
     elements.documentCapability.textContent = mode.documents;
     elements.launcherLabel.textContent = formatString(strings.askAssistant, {
       assistant: state.config.assistantName,
@@ -974,6 +987,10 @@ if (typeof document !== "undefined") {
       });
       const data = await getJson(response);
       if (!response.ok) {
+        if (data?.code === "source_policy_unverified") {
+          showError(currentStrings().sourcePolicyUnverified, message);
+          return;
+        }
         if (isPreviousResponseFailure(response.status, data)) {
           state.previousResponseId = null;
           state.lastFailedMessage = message;

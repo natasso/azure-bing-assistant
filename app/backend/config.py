@@ -9,6 +9,9 @@ from dataclasses import dataclass
 from typing import Mapping
 from urllib.parse import urlsplit
 
+from azure_bing_assistant.config import validate_websites
+from azure_bing_assistant.agent import SearchDocumentSource
+
 
 DEFAULT_UI_LANGUAGE = "it"
 LOCALIZED_UI_DEFAULTS = {
@@ -18,7 +21,7 @@ LOCALIZED_UI_DEFAULTS = {
         "assistant_name": "Assistente",
         "welcome_title": "Come posso aiutarti?",
         "welcome_subtitle": (
-            "Fai una domanda sulle informazioni aggiornate disponibili sul web."
+            "Fai una domanda sulle informazioni disponibili nei siti autorizzati."
         ),
         "disclaimer": (
             "Questo assistente usa l'AI. Verifica le informazioni importanti "
@@ -37,7 +40,7 @@ LOCALIZED_UI_DEFAULTS = {
         "organization_name": "Organization",
         "assistant_name": "Assistant",
         "welcome_title": "How can I help?",
-        "welcome_subtitle": "Ask a question about current information from the web.",
+        "welcome_subtitle": "Ask a question about information from authorized websites.",
         "disclaimer": (
             "This assistant uses AI. Verify important information and do not "
             "share sensitive data."
@@ -133,6 +136,8 @@ class AppSettings:
     foundry_project_endpoint: str | None = None
     chatbot_name: str | None = None
     agent_timeout_seconds: float = 90.0
+    allowed_domains: tuple[str, ...] = ()
+    document_source: SearchDocumentSource | None = None
 
     def __post_init__(self) -> None:
         if self.environment not in {"development", "test", "production"}:
@@ -169,6 +174,8 @@ class AppSettings:
             raise ValueError("CHATBOT_NAME must be a lowercase Azure identifier")
         if self.ui_config is None:
             object.__setattr__(self, "ui_config", UIConfig())
+        if self.allowed_domains or self.foundry_project_endpoint:
+            object.__setattr__(self, "allowed_domains", validate_websites(self.allowed_domains))
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> "AppSettings":
@@ -197,5 +204,18 @@ class AppSettings:
             foundry_project_endpoint=source.get("FOUNDRY_PROJECT_ENDPOINT"),
             chatbot_name=source.get("CHATBOT_NAME"),
             agent_timeout_seconds=timeout,
+            allowed_domains=(
+                validate_websites(source["WEB_GROUNDING_SITES"].split(","))
+                if "WEB_GROUNDING_SITES" in source else ()
+            ),
+            document_source=(
+                SearchDocumentSource(
+                    source.get("STORAGE_ACCOUNT_NAME", ""),
+                    source.get("STORAGE_CONTAINER_NAME", ""),
+                )
+                if source.get("KNOWLEDGE_MODE") == "searchBlob"
+                and (source.get("STORAGE_ACCOUNT_NAME") or source.get("STORAGE_CONTAINER_NAME"))
+                else None
+            ),
             ui_config=ui_config,
         )

@@ -11,8 +11,10 @@ from ipaddress import ip_address
 from typing import Mapping
 from urllib.parse import urlsplit
 
+from .installer_messages import InstallerMessageError
 
-class ConfigurationError(ValueError):
+
+class ConfigurationError(InstallerMessageError, ValueError):
     """Raised when installer input is unsafe or incomplete."""
 
 
@@ -31,11 +33,32 @@ _AZURE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _RESOURCE_GROUP = re.compile(r"^[A-Za-z0-9._()\-]{1,90}$")
 _DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _CONTROL_CHARACTER = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-def _validate_identifier(name: str, value: str) -> str:
+
+
+def validate_identifier(name: str, value: str) -> str:
     if not _IDENTIFIER.fullmatch(value):
         raise ConfigurationError(
-            f"{name} must be 3-24 lowercase letters, digits, or hyphens and start with a letter"
+            "{name} must be 3-24 lowercase letters, digits, or hyphens and start with a letter",
+            name=name,
         )
+    return value
+
+
+def validate_resource_group(value: str, name: str = "resource_group_name") -> str:
+    if not _RESOURCE_GROUP.fullmatch(value):
+        raise ConfigurationError("{name} is not valid for Azure", name=name)
+    return value
+
+
+def validate_azure_name(name: str, value: str) -> str:
+    if not _AZURE_NAME.fullmatch(value):
+        raise ConfigurationError("{name} contains unsupported characters", name=name)
+    return value
+
+
+def validate_model_capacity(value: int) -> int:
+    if value < 1:
+        raise ConfigurationError("model_capacity must be positive")
     return value
 
 
@@ -48,14 +71,15 @@ def _environment_boolean(source: Mapping[str, str], name: str, default: bool) ->
         return True
     if normalized in {"false", "0", "no"}:
         return False
-    raise ConfigurationError(f"{name} must be true or false")
+    raise ConfigurationError("{name} must be true or false", name=name)
 
 
 def _validate_ui_text(name: str, value: str, maximum: int) -> str:
     normalized = value.strip()
     if not normalized or len(normalized) > maximum or _CONTROL_CHARACTER.search(normalized):
         raise ConfigurationError(
-            f"{name} must be 1-{maximum} characters without control characters"
+            "{name} must be 1-{maximum} characters without control characters",
+            name=name, maximum=maximum,
         )
     return normalized
 
@@ -82,30 +106,37 @@ def parse_suggestions(value: str) -> tuple[str, ...]:
 
 
 def validate_websites(values: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    """Normalize allowed domains, never broaden a path-scoped URL."""
+    if not isinstance(values, (list, tuple)):
+        raise ConfigurationError("allowed domains must be a list or tuple")
     normalized: list[str] = []
     for raw in values:
+        if not isinstance(raw, str):
+            raise ConfigurationError("allowed domains must be strings")
         value = raw.strip()
         if not value:
-            continue
+            raise ConfigurationError("at least one allowed domain is required; empty entries are invalid")
+        if any(c.isspace() or ord(c) < 0x20 for c in value) or "\\" in value:
+            raise ConfigurationError("allowed domains contain unsafe characters")
         candidate = value if "://" in value else f"https://{value}"
-        parsed = urlsplit(candidate)
         try:
-            port = parsed.port
-        except ValueError as exc:
-            raise ConfigurationError("website port is invalid") from exc
+            parsed = urlsplit(candidate)
+            host = (parsed.hostname or "").encode("idna").decode("ascii").lower().rstrip(".")
+        except (ValueError, UnicodeError) as exc:
+            raise ConfigurationError("website domain is invalid") from exc
         if (
             parsed.scheme != "https"
-            or not parsed.hostname
-            or parsed.username
-            or parsed.password
-            or port
-            or parsed.query
-            or parsed.fragment
+            or not host
+            or "@" in parsed.netloc
+            or ":" in parsed.netloc
+            or "?" in value
+            or "#" in value
+            or parsed.path not in {"", "/"}
         ):
             raise ConfigurationError(
-                "websites must be public HTTPS domains or paths without credentials, ports, query, or fragment"
+                "websites must be public domains or root HTTPS URLs without paths, "
+                "wildcards, credentials, ports, query, or fragment"
             )
-        host = parsed.hostname.lower().rstrip(".")
         try:
             ip_address(host)
         except ValueError:
@@ -113,14 +144,21 @@ def validate_websites(values: list[str] | tuple[str, ...]) -> tuple[str, ...]:
         else:
             raise ConfigurationError("website IP addresses are not accepted")
         labels = host.split(".")
-        if len(labels) < 2 or any(not _DNS_LABEL.fullmatch(label) for label in labels):
+        if (
+            len(host) > 253
+            or len(labels) < 2
+            or labels[-1].isdigit()
+            or labels[-1] in {"local", "localhost", "localdomain", "internal", "lan", "home"}
+            or host.endswith(".home.arpa")
+            or any(not _DNS_LABEL.fullmatch(label) for label in labels)
+        ):
             raise ConfigurationError("website must contain a valid public DNS name")
-        path = parsed.path.rstrip("/")
-        normalized_value = f"https://{host}{path}"
-        if normalized_value not in normalized:
-            normalized.append(normalized_value)
+        if host not in normalized:
+            normalized.append(host)
+        if len(normalized) > 100:
+            raise ConfigurationError("at most 100 distinct allowed domains are supported")
     if not normalized:
-        raise ConfigurationError("at least one preferred website/domain is required")
+        raise ConfigurationError("at least one allowed domain is required")
     return tuple(normalized)
 
 
@@ -155,7 +193,7 @@ class InstallerConfig:
     search_index_data_reader_role_definition_id: str | None = None
 
     def __post_init__(self) -> None:
-        _validate_identifier("environment_name", self.environment_name)
+        validate_identifier("environment_name", self.environment_name)
         if not _LOCATION.fullmatch(self.location):
             raise ConfigurationError("location must be a lowercase Azure region identifier")
         if self.knowledge_mode is not None and not isinstance(
@@ -176,9 +214,9 @@ class InstallerConfig:
         ):
             value = getattr(self, field_name)
             if value is not None and not value.startswith("/subscriptions/"):
-                raise ConfigurationError(f"{field_name} must be a full Azure resource ID")
-        if self.resource_group_name and not _RESOURCE_GROUP.fullmatch(self.resource_group_name):
-            raise ConfigurationError("resource_group_name is not valid for Azure")
+                raise ConfigurationError("{name} must be a full Azure resource ID", name=field_name)
+        if self.resource_group_name:
+            validate_resource_group(self.resource_group_name)
         for field_name in (
             "model_name",
             "model_version",
@@ -187,10 +225,10 @@ class InstallerConfig:
             "model_deployment_name",
         ):
             value = getattr(self, field_name)
-            if value is not None and not _AZURE_NAME.fullmatch(value):
-                raise ConfigurationError(f"{field_name} contains unsupported characters")
+            if value is not None:
+                validate_azure_name(field_name, value)
         if self.chatbot_name is not None:
-            _validate_identifier("chatbot_name", self.chatbot_name)
+            validate_identifier("chatbot_name", self.chatbot_name)
         if self.ui_language is not None:
             validate_ui_language(self.ui_language)
         ui_limits = {
@@ -228,16 +266,11 @@ class InstallerConfig:
                     for suggestion in self.ui_suggestions
                 ),
             )
-        if self.model_capacity < 1:
-            raise ConfigurationError("model_capacity must be positive")
-        if self.websites and validate_websites(self.websites) != self.websites:
-            raise ConfigurationError("websites must already be normalized")
-        if self.strict_websites:
-            raise ConfigurationError(
-                "strict website enforcement is not provisioned by this installer; "
-                "use a verified Bing Custom Search configuration or an Azure AI Search "
-                "Web Knowledge Source with allowedDomains"
-            )
+        validate_model_capacity(self.model_capacity)
+        if self.websites:
+            object.__setattr__(self, "websites", validate_websites(self.websites))
+        # Compatibility flag: there is no unrestricted web mode.
+        object.__setattr__(self, "strict_websites", True)
 
     @classmethod
     def from_values(
@@ -292,7 +325,7 @@ class InstallerConfig:
             ),
             websites=(
                 validate_websites(source["WEB_GROUNDING_SITES"].split(","))
-                if source.get("WEB_GROUNDING_SITES")
+                if "WEB_GROUNDING_SITES" in source
                 else ()
             ),
             bing_terms_accepted=_environment_boolean(
@@ -339,9 +372,9 @@ class InstallerConfig:
                 if self.ui_suggestions is not None
                 else "<localized default>"
             ),
-            "webGrounding": "bing",
+            "webGrounding": "web_search",
             "websites": ",".join(self.websites) if self.websites else "<configure>",
-            "websiteEnforcement": "advisory",
+            "websiteEnforcement": "allowed_domains",
         }
 
     def require_complete_install(self) -> None:
@@ -362,7 +395,7 @@ class InstallerConfig:
         missing = [name for name, value in required.items() if not value]
         if missing:
             raise ConfigurationError(
-                "non-interactive install requires: " + ", ".join(sorted(missing))
+                "non-interactive install requires: {fields}", fields=", ".join(sorted(missing))
             )
         if not self.bing_terms_accepted:
             raise ConfigurationError("Bing terms and data-flow acknowledgement is required")

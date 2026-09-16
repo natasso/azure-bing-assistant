@@ -17,11 +17,11 @@
 
 ## Italiano
 
-### Il tuo sito, una conversazione. Il web di Bing, il modello che scegli.
+### I tuoi siti autorizzati, una conversazione. Il modello che scegli.
 
 Aiuta le persone a orientarsi tra informazioni pubbliche, servizi e contatti
 con un chatbot web nel tuo ambiente Azure. **Azure Bing Assistant** unisce
-Grounding with Bing Search a un modello compatibile scelto in Microsoft Foundry:
+ricerca nativa `web_search` filtrata per dominio (basata su Bing) a un modello compatibile in Microsoft Foundry:
 puoi partire dal web senza costruire prima un indice documentale.
 
 Pensato per università italiane, adattabile ad aziende e pubbliche
@@ -36,7 +36,7 @@ non sostituisce il personale né le comunicazioni ufficiali.
 
 ### Perché sceglierlo
 
-- **Parti dalle informazioni già sul web.** Bing può cercare contenuti pubblici
+- **Parti dalle informazioni nei siti autorizzati.** Bing può cercare contenuti pubblici autorizzati
   e fornire citazioni per risalire alle fonti: non devi preparare un archivio di
   documenti per iniziare con la modalità base.
 - **Scegli il modello di riferimento, non un compromesso fisso.** Il wizard
@@ -77,6 +77,10 @@ voci sono esclusi.
 
 ![Architettura Azure Bing Assistant in italiano](docs/assets/architecture-it.svg)
 
+**Illustrazioni precedenti:** screenshot e grafi mostrano ancora le vecchie etichette
+e la risorsa/connessione Bing standalone. Il codice attuale usa `web_search` filtrato
+senza tale risorsa; vedere [architettura aggiornata](docs/architecture.md).
+
 Altre viste: [modalità documenti (dimostrazione locale
 illustrativa)](docs/assets/chat-search-desktop.png) ·
 [mobile](docs/assets/chat-mobile.png) · [tema scuro](docs/assets/chat-dark.png) ·
@@ -97,8 +101,8 @@ personalizzati o le risposte del modello.
 
 | Esperienza | Valore tecnico | Risorse |
 |---|---|---|
-| **Chat web Bing (predefinita)** | `off` | Foundry, modello, Grounding with Bing Search, App Service |
-| **Bing + documenti gestiti** | `searchBlob` | Tutto quanto sopra, più Blob Storage e Azure AI Search |
+| **Siti autorizzati (predefinita)** | `off` | Foundry, modello, consumo web search Bing, App Service |
+| **Siti autorizzati + documenti gestiti** | `searchBlob` | Tutto quanto sopra, più Blob Storage e Azure AI Search |
 
 `off` significa soltanto **ricerca documentale disattivata**: Bing e la chat
 restano attivi. `searchBlob` non sostituisce Bing, costa di più e rende i
@@ -106,9 +110,49 @@ documenti disponibili solo dopo che un amministratore li ha caricati fuori
 dalla chat, indicizzati e verificati. La chat non offre allegati, upload,
 selettori di fonti o un cambio modalità per l'utente.
 
-I siti preferiti configurati per Bing sono indicazioni, non una allowlist. Il
-flag `--strict-websites` non è supportato e termina con errore; il chatbot non
-promette risultati limitati ai domini di un'università.
+`--websites` / `WEB_GROUNDING_SITES` sono obbligatori: massimo 100 domini,
+inclusi i loro sottodomini, non percorsi. Lo strumento tipizzato invia
+`web_search.filters.allowed_domains`; non esiste fallback web senza filtro.
+`--strict-websites` resta un alias di compatibilità: il filtro è sempre richiesto.
+Il runtime verifica e fissa la versione agente e controlla i metadati delle fonti,
+rifiutando risultati non verificabili. **Accettazione/enforcement live per modello
+e regione, incluso `open_page`, restano da verificare manualmente.** I test offline
+non provano fetch remoti né correttezza di ogni affermazione.
+
+Il wizard raccoglie un dominio alla volta, chiede se includere i sottodomini e
+poi se aggiungerne un altro. **No ai sottodomini blocca l'installazione prima dei
+termini e delle scritture Azure:** il motore nativo include sempre i sottodomini,
+quindi «solo questo host» non è supportato e non viene trasformato in Sì.
+La lingua scelta per il chatbot controlla anche l'intero installer.
+Vedere gli [esempi IT/EN](docs/configuration.md#domini-uno-alla-volta);
+riavviare manualmente un wizard già aperto per caricare il codice aggiornato.
+
+Formato, limiti e valori predefiniti sono mostrati prima delle risposte.
+Errori di menu, nomi, capacità o domini ripropongono solo il campo da correggere,
+conservando le risposte precedenti. I nomi tecnici di chatbot e installazione
+richiedono 3–24 lettere minuscole, cifre o trattini, iniziando con una lettera
+(es. `assistente-demo`): il titolo pubblico con spazi si configura separatamente.
+Ctrl+C/EOF annulla; termini e conferma finale mantengono No come predefinito.
+
+L'installer interattivo salva progressivamente le risposte valide in
+`.azure/installer-draft.json`, **file locale in chiaro da tenere privato**, escluso
+da Git. Dopo un errore, rieseguire `install`: Invio riusa i valori mostrati,
+riconvalidati contro le scelte Azure attuali. Credenziali, termini e conferma
+finale non sono salvati: i due consensi richiedono sempre un nuovo Sì.
+`python -m azure_bing_assistant install --reset-wizard` elimina solo questa bozza.
+La bozza si cancella automaticamente solo dopo la distribuzione completa riuscita;
+non è memoria delle conversazioni. Le risposte di errori precedenti a questa
+modifica non sono recuperabili se non esisteva già una bozza.
+
+Dopo il Sì finale, `install` mostra su **stderr** cinque fasi reali con attività
+ed elapsed, ad esempio `Fase 2/5 · Creazione delle risorse Azure · in corso · 01:15`.
+Il terminale anima un indicatore; output reindirizzato usa righe semplici e un
+segnale ogni 30 secondi. Non sono percentuali o stime di completamento.
+Ctrl+C interrompe l'attesa locale, **non** annulla le operazioni Azure.
+Prima della capacità: esempi PAYG test **10** / produzione **100** unità, solo
+illustrativi entro i limiti SKU; nessuna sostituzione automatica di un valore
+salvato valido, anche **1000**. Rapporti TPM/RPM e carico reale vanno verificati.
+Vedi [capacità e avanzamento](docs/configuration.md#capacita-e-avanzamento-it).
 
 <a id="installazione-rapida-it"></a>
 
@@ -210,7 +254,7 @@ privacy, accessibilità, carico e policy organizzative. Vedere
 
 ## English
 
-### Your website, a conversation. Bing's web, your choice of model.
+### Your authorized websites, a conversation. Your choice of model.
 
 Help people navigate public information, services, and contacts with a web
 chatbot in your Azure environment. **Azure Bing Assistant** pairs Grounding
@@ -229,7 +273,7 @@ staff or official communications.
 
 ### Why choose it
 
-- **Start with information already on the web.** Bing can search public content
+- **Start with information on authorized websites.** Bing can search authorized public content
   and provide citations to its sources: no document collection is required to
   start with the base mode.
 - **Choose your reference model, not a fixed trade-off.** The wizard offers
@@ -270,6 +314,10 @@ items are excluded.
 
 ![Azure Bing Assistant architecture in English](docs/assets/architecture-en.svg)
 
+**Earlier illustrations:** screenshots and graphs still show old labels and the
+standalone Bing resource/connection. Current code uses filtered `web_search`
+without that resource; see the [updated architecture](docs/architecture.md).
+
 More Italian-default views: [document mode (illustrative local
 demonstration)](docs/assets/chat-search-desktop.png) ·
 [mobile](docs/assets/chat-mobile.png) · [dark theme](docs/assets/chat-dark.png) ·
@@ -288,8 +336,8 @@ selector and does not translate custom text or model answers.
 
 | Experience | Technical value | Resources |
 |---|---|---|
-| **Bing web chat (default)** | `off` | Foundry, model, Grounding with Bing Search, App Service |
-| **Bing + managed documents** | `searchBlob` | Everything above, plus Blob Storage and Azure AI Search |
+| **Authorized websites (default)** | `off` | Foundry, model, Bing web-search consumption, App Service |
+| **Authorized websites + managed documents** | `searchBlob` | Everything above, plus Blob Storage and Azure AI Search |
 
 `off` means only **document search off**: Bing and chat remain enabled.
 `searchBlob` does not replace Bing, costs more, and makes documents available
@@ -297,9 +345,48 @@ only after an administrator uploads them outside the chat, indexes them, and
 verifies the indexer. The chat has no attachments, upload, source picker, or
 user-facing mode switch.
 
-Preferred Bing sites are guidance, not an allowlist. `--strict-websites` is
-unsupported and fails explicitly; the chatbot does not promise results limited
-to a university's domains.
+`--websites` / `WEB_GROUNDING_SITES` are required: up to 100 domains, including
+subdomains, not paths. The typed tool sends `web_search.filters.allowed_domains`;
+there is no unfiltered fallback. `--strict-websites` is a compatibility alias:
+restriction is always required. Runtime verifies and pins an agent version,
+checks consulted-source metadata, and rejects unverifiable results.
+**Live model/region acceptance and enforcement, including `open_page`, require
+manual verification.** Offline tests do not prove remote fetch behavior or the
+correctness of every statement.
+
+The wizard collects one domain, asks whether to include subdomains, then whether
+to add another. **No to subdomains blocks installation before terms and Azure
+writes:** the native engine always includes descendants, so “only this host”
+is unsupported and is never converted to Yes. The chatbot language also controls
+the entire installer. See the [IT/EN examples](docs/configuration.md#domains-one-at-a-time);
+manually restart an already open wizard to load the updated code.
+
+Formats, limits, and defaults appear before you answer. Invalid menu choices,
+names, capacity, or domains repeat only the affected field, preserving earlier
+answers. Chatbot and installation technical names require 3–24 lowercase letters,
+digits or hyphens, starting with a letter (e.g. `assistant-demo`); public labels
+with spaces are configured separately. Ctrl+C/EOF cancels; terms and final
+approval still default to No.
+
+The interactive installer saves valid answers incrementally in
+`.azure/installer-draft.json`, a **private local plaintext file**, excluded from
+Git. After a failure, run `install` again: Enter reuses displayed values,
+revalidated against current Azure choices. Credentials, Bing terms and final
+approval are never saved; both consents always require a fresh Yes.
+`python -m azure_bing_assistant install --reset-wizard` removes only this draft.
+It is automatically cleared only after successful full application deployment;
+it is not chat conversation storage. Answers from failures before this change
+cannot be recovered unless a draft already existed.
+
+After final approval, `install` shows five real phases on **stderr**, for example
+`Phase 2/5 · Provisioning Azure resources · in progress · 01:15`.
+A terminal animates an activity indicator; redirected output uses plain lines
+and a heartbeat every 30 seconds. These are not percentages or completion estimates.
+Ctrl+C stops the local wait, **not** remote Azure operations.
+Capacity help gives illustrative PAYG test **10** / production **100** unit
+examples within SKU bounds; a valid saved value, including **1000**, is never
+automatically replaced. Actual TPM/RPM ratios and peak load still need verification.
+See [capacity and progress](docs/configuration.md#capacity-and-progress-en).
 
 <a id="quick-install-en"></a>
 
