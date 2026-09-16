@@ -537,8 +537,8 @@ def install_run(monkeypatch, answers, *arguments):
     return cli.main(["install", "--ui-language", "en", *arguments]), reader, output
 
 
-@pytest.mark.parametrize("first_failure", ["cancel", "provider", "provision", "package", "interrupt"])
-def test_two_cli_runs_resume_and_only_full_deployment_clears(tmp_path, monkeypatch, first_failure):
+@pytest.mark.parametrize("first_failure", ["cancel", "provider", "provision", "package", "interrupt", "success"])
+def test_repeated_cli_runs_retain_answers_after_all_outcomes(tmp_path, monkeypatch, first_failure):
     monkeypatch.chdir(tmp_path)
     runner = Mock()
     runner.get_environment_values.return_value = {}
@@ -564,20 +564,31 @@ def test_two_cli_runs_resume_and_only_full_deployment_clears(tmp_path, monkeypat
             provisioner.run.side_effect = KeyboardInterrupt()
         elif first_failure == "provision":
             provisioner.run.side_effect = RuntimeError("provision failed")
-        else:
+        elif first_failure == "package":
             deployed.side_effect = RuntimeError("package failed")
     if answers is not None:
         assert install_run(monkeypatch, answers)[0] == (
-            1 if first_failure == "cancel" else 130 if first_failure == "interrupt" else 2
+            1 if first_failure == "cancel" else 130 if first_failure == "interrupt" else 0 if first_failure == "success" else 2
         )
     persisted = load(tmp_path)
     assert persisted.path.exists() and persisted.get("chatbot_name") == "helper"
     provisioner.run.side_effect = None
     deployed.side_effect = lambda _runner, config, _values, **_kwargs: SimpleNamespace(config=config)
     result, _, _ = install_run(monkeypatch, RESUME_ANSWERS + ["yes"])
-    assert result == 0 and not persisted.path.exists()
+    assert result == 0 and persisted.path.exists()
     assert deployed.call_args.args[1].model_capacity == 7
     assert deployed.call_args.args[1].subscription_id == "sub-one"
+    calls = deployed.call_count
+    result, reader, _ = install_run(monkeypatch, RESUME_ANSWERS + ["no"])
+    assert result == 1 and deployed.call_count == calls
+    assert "[7]" in reader.call_args_list[4].args[0]
+    assert reader.call_args_list[-1].args[0].endswith("[y/N]: ")
+    assert load(tmp_path).get("capacity") == 7
+    result, reader, _ = install_run(monkeypatch, [""] * 12 + ["no"])
+    assert result == 2 and deployed.call_count == calls
+    assert reader.call_args_list[-1].args[0].endswith("[y/N]: ")
+    saved = persisted.path.read_text()
+    assert "bing_terms_accepted" not in saved and "credential" not in saved
 
 
 @pytest.mark.parametrize("language", ["it", "en"])
@@ -605,7 +616,9 @@ def test_interrupt_after_approval_keeps_draft_and_reports_remote_continuation(tm
     p, _, _ = prompts(RESUME_ANSWERS + ["yes"], language)
     monkeypatch.setattr(cli, "ConsolePrompts", lambda **_: p)
     monkeypatch.setattr(cli, "AzureCliDiscovery", discovery)
-    monkeypatch.setattr(cli, "AzdRunner", lambda _: Mock())
+    monkeypatch.setattr(cli, "AzdRunner", lambda _: Mock(
+        get_environment_values=Mock(return_value={}),
+    ))
     monkeypatch.setattr(cli, "AzureProvisioner", lambda _: SimpleNamespace(run=Mock(side_effect=KeyboardInterrupt())))
     assert cli.main(["install", "--ui-language", language]) == 130
     text = capsys.readouterr().err
@@ -630,7 +643,7 @@ def test_resumed_consent_always_requires_fresh_yes_and_never_writes_azure(tmp_pa
     assert load(tmp_path).get("domains")[0]["include_subdomains"] is True
 
 
-def test_cli_cleanup_failure_reports_success_and_warning(tmp_path, monkeypatch, capsys):
+def test_cli_success_never_attempts_to_remove_saved_defaults(tmp_path, monkeypatch, capsys):
     seed(tmp_path)
     monkeypatch.chdir(tmp_path)
     runner = Mock()
@@ -643,15 +656,36 @@ def test_cli_cleanup_failure_reports_success_and_warning(tmp_path, monkeypatch, 
     original = Path.unlink
     def fail(path, *args, **kwargs):
         if path.name == "installer-draft.json":
-            raise PermissionError("test only")
+            raise AssertionError("Successful installation must retain defaults")
         return original(path, *args, **kwargs)
     monkeypatch.setattr(Path, "unlink", fail)
     assert install_run(monkeypatch, RESUME_ANSWERS + ["yes"])[0] == 0
     captured = capsys.readouterr()
     assert '"status": "succeeded"' in captured.out
-    assert "Deployment succeeded, but" in captured.err
+    assert "Deployment succeeded, but" not in captured.err
     assert "Installation failed" not in captured.err
     assert load(tmp_path).has_answers
+
+
+def test_reset_after_success_only_clears_local_wizard_answers(tmp_path, monkeypatch):
+    seed(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    runner = Mock()
+    runner.get_environment_values.return_value = {}
+    provisioner = Mock()
+    provisioner.run.return_value = {}
+    monkeypatch.setattr(cli, "AzdRunner", lambda *_: runner)
+    monkeypatch.setattr(cli, "AzureProvisioner", lambda *_: provisioner)
+    monkeypatch.setattr(cli, "_deploy_application", lambda _r, config, _v, **_kwargs: SimpleNamespace(config=config))
+    assert install_run(monkeypatch, RESUME_ANSWERS + ["yes"])[0] == 0
+    other = tmp_path / ".azure" / "config.json"
+    other.write_text("preserve environment")
+    assert load(tmp_path).get("capacity") == 7
+    result, reader, _ = install_run(monkeypatch, [EOFError()], "--reset-wizard")
+    assert result == 1
+    assert load(tmp_path).get("capacity") is None
+    assert other.read_text() == "preserve environment"
+    assert "[7]" not in reader.call_args.args[0]
 
 
 def test_cli_save_failure_stops_before_discovery_or_any_azure_write(tmp_path, monkeypatch, capsys):

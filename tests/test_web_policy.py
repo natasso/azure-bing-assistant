@@ -137,6 +137,108 @@ def test_writer_rejects_service_that_drops_filter():
     assert len(transport.requests) == 1
 
 
+@pytest.mark.parametrize("status", [403, 429, 500])
+def test_configuration_disables_sdk_default_retries_even_for_retryable_status(status):
+    class Rejected(AgentTransport):
+        def send(self, request, **kwargs):
+            self.requests.append(request)
+            return JsonResponse(request, {"error": {"message": "PRIVATE"}}, status=status)
+
+    transport = Rejected()
+    with AIProjectClient(
+        endpoint="https://offline.services.ai.azure.com/api/projects/project",
+        credential=Credential(), transport=transport,
+    ) as project:
+        writer = FoundrySdkWriter(
+            "https://offline.services.ai.azure.com/api/projects/project",
+            Credential(), "offline-model", project_client=project,
+        )
+        with pytest.raises(SourcePolicyError):
+            AgentToolOrchestrator(writer, "offline-agent").configure_tools(DOMAINS)
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.parametrize("connection_elapsed,expected_requests", [(7, 2), (20, 1)])
+def test_configuration_deadline_includes_search_connection_and_never_posts_after_expiry(
+    monkeypatch, connection_elapsed, expected_requests,
+):
+    now = [0]
+    options = []
+    monkeypatch.setattr("azure_bing_assistant.agent.time.monotonic", lambda: now[0])
+
+    class BudgetTransport(AgentTransport):
+        def send(self, request, **kwargs):
+            options.append(kwargs)
+            result = super().send(request, **kwargs)
+            if "/connections/" in request.url:
+                now[0] += connection_elapsed
+            return result
+
+    transport = BudgetTransport()
+    with AIProjectClient(
+        endpoint="https://offline.services.ai.azure.com/api/projects/project",
+        credential=Credential(), transport=transport,
+    ) as project:
+        writer = FoundrySdkWriter(
+            "https://offline.services.ai.azure.com/api/projects/project",
+            Credential(), "offline-model", project_client=project, configuration_timeout=20,
+        )
+        def configure():
+            return AgentToolOrchestrator(writer, "offline-agent").configure_tools(
+                DOMAINS, search_index_name="documents", search_connection_name="search",
+            )
+        if expected_requests == 1:
+            with pytest.raises(SourcePolicyError, match="time budget expired"):
+                configure()
+        else:
+            configure()
+    assert len(transport.requests) == expected_requests
+    assert options[0]["connection_timeout"] == options[0]["read_timeout"] == 10
+    if expected_requests == 2:
+        assert options[1]["connection_timeout"] == options[1]["read_timeout"] == 6.5
+
+
+def test_expired_configuration_budget_does_not_submit_agent():
+    transport = AgentTransport()
+    with AIProjectClient(
+        endpoint="https://offline.services.ai.azure.com/api/projects/project",
+        credential=Credential(), transport=transport,
+    ) as project:
+        writer = FoundrySdkWriter(
+            "https://offline.services.ai.azure.com/api/projects/project",
+            Credential(), "offline-model", project_client=project, configuration_timeout=0,
+        )
+        with pytest.raises(SourcePolicyError, match="time budget expired"):
+            AgentToolOrchestrator(writer, "offline-agent").configure_tools(DOMAINS)
+    assert not transport.requests
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 429])
+def test_search_connection_failure_preserves_explicit_http_cause_without_raw_provider_content(status):
+    from azure_bing_assistant.installer_access import _is_forbidden
+    class Rejected(AgentTransport):
+        def send(self, request, **kwargs):
+            self.requests.append(request)
+            return JsonResponse(request, {"error": {"message": "PRIVATE_PROVIDER_BODY"}}, status=status)
+
+    transport = Rejected()
+    with AIProjectClient(
+        endpoint="https://offline.services.ai.azure.com/api/projects/project",
+        credential=Credential(), transport=transport,
+    ) as project:
+        writer = FoundrySdkWriter(
+            "https://offline.services.ai.azure.com/api/projects/project",
+            Credential(), "offline-model", project_client=project,
+        )
+        with pytest.raises(SourcePolicyError) as caught:
+            AgentToolOrchestrator(writer, "offline-agent").configure_tools(
+                DOMAINS, search_index_name="documents", search_connection_name="search",
+            )
+    assert len(transport.requests) == 1 and transport.requests[0].method == "GET"
+    assert "PRIVATE" not in str(caught.value)
+    assert _is_forbidden(caught.value) == (status == 403)
+
+
 @pytest.mark.parametrize("status", [401, 403, 400, 429, 500])
 @pytest.mark.parametrize("language", ["it", "en"])
 def test_writer_reports_safe_localized_auth_errors_without_capability_assumptions(status, language):

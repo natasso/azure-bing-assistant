@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import inspect
 import re
+import time
 from dataclasses import dataclass, field
 from ipaddress import ip_address
 from typing import Any, Protocol
@@ -525,6 +526,7 @@ class FoundrySdkWriter:
         project_client: Any | None = None,
         owns_credential: bool = False,
         owns_project_client: bool = False,
+        configuration_timeout: float = 60,
     ) -> None:
         try:
             self.project = project_client
@@ -532,6 +534,7 @@ class FoundrySdkWriter:
             self._owns_project_client = owns_project_client
             self._owns_credential = owns_credential
             self._closed = False
+            self.configuration_timeout = configuration_timeout
             if not endpoint.startswith("https://") or not model_deployment_name:
                 raise ValueError("Foundry endpoint and model deployment are required")
             if self.credential is None:
@@ -597,12 +600,46 @@ class FoundrySdkWriter:
                 f"Foundry SDK cleanup failed ({', '.join(failures)})"
             ) from None
 
+    def probe_project_access(self, timeout: float) -> None:
+        from azure.core.exceptions import AzureError
+
+        if timeout <= 0:
+            raise SourcePolicyError(
+                "Foundry configuration time budget expired; no further request was submitted."
+            )
+        try:
+            pages = self.project.agents.list(
+                connection_timeout=min(30, timeout / 2),
+                read_timeout=min(60, timeout / 2),
+                retry_total=0,
+            ).by_page()
+            next(pages, None)
+        except AzureError as exc:
+            raise SourcePolicyError(
+                "Foundry could not configure the filtered agent. Inspect service diagnostics; "
+                "the domain restriction was not relaxed."
+            ) from exc
+
     def configure_agent(
         self,
         agent_name: str,
         tools: list[dict[str, Any]],
         instructions: str,
     ) -> str:
+        deadline = time.monotonic() + self.configuration_timeout
+
+        def request_options() -> dict[str, float | int]:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SourcePolicyError(
+                    "Foundry configuration time budget expired; no further request was submitted."
+                )
+            return {
+                "connection_timeout": min(30, remaining / 2),
+                "read_timeout": min(60, remaining / 2),
+                "retry_total": 0,
+            }
+
         from azure.core.exceptions import AzureError, ClientAuthenticationError, HttpResponseError
         try:
             from azure.ai.projects.models import (
@@ -624,7 +661,13 @@ class FoundrySdkWriter:
                     WebSearchTool(filters=WebSearchToolFilters(allowed_domains=list(domains)))
                 )
             elif tool["type"] == "azure_ai_search":
-                connection = self.project.connections.get(tool["connection"])
+                try:
+                    connection = self.project.connections.get(tool["connection"], **request_options())
+                except AzureError as exc:
+                    raise SourcePolicyError(
+                        "Foundry could not configure the filtered agent. Inspect service diagnostics; "
+                        "the domain restriction was not relaxed."
+                    ) from exc
                 sdk_tools.append(
                     AzureAISearchTool(
                         azure_ai_search=AzureAISearchToolResource(
@@ -654,6 +697,7 @@ class FoundrySdkWriter:
                     tools=sdk_tools,
                 ),
                 description="Configured chatbot agent",
+                **request_options(),
             )
         except ClientAuthenticationError as exc:
             raise SourcePolicyError(

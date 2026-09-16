@@ -78,6 +78,15 @@ resource webFoundryUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
+module projectAccess 'foundry-project-access.bicep' = {
+  name: 'project-access'
+  params: {
+    accountName: account.name
+    roleDefinitionId: cognitiveUserRoleDefinitionId
+    projectPrincipalId: project.identity.principalId
+  }
+}
+
 output accountName string = account.name
 output projectName string = project.name
 output principalId string = project.identity.principalId

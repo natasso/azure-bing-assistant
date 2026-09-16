@@ -23,6 +23,6 @@ def test_package_metadata_declares_mit_and_includes_license_notices():
     assert project["project"]["license-files"] == ["LICENSE", "NOTICE"]
     for name in project["project"]["license-files"]:
         assert (root / name).is_file()
-    assert 'Copyright (c) 2026 Donato "natasso" Pasqualicchio' in (
+    assert "Copyright (c) 2026 natasso" in (
         root / "LICENSE"
     ).read_text(encoding="utf-8")

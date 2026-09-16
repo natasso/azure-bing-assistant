@@ -165,7 +165,8 @@ writes:** the native engine always includes descendants, so “only this host”
 is unsupported and is never converted to Yes. The chatbot language also controls
 the entire installer. See the [domain-policy examples](docs/configuration.md#domains-one-at-a-time)
 and [native yes/no inputs for all nine languages](docs/configuration.md#languages);
-manually restart an already open wizard to load the updated code.
+updated code applies to the next process. Let an already running installer finish;
+do not interrupt it just to load an update.
 
 Formats, limits, and defaults appear before you answer. Invalid menu choices,
 names, capacity, or domains repeat only the affected field, preserving earlier
@@ -176,13 +177,15 @@ approval still default to No.
 
 The interactive installer saves valid answers incrementally in
 `.azure/installer-draft.json`, a **private local plaintext file**, excluded from
-Git. After a failure, run `install` again: Enter reuses displayed values,
+Git. After success, failure, or cancellation, run `install` again: Enter reuses displayed values,
 revalidated against current Azure choices. Credentials, Bing terms and final
 approval are never saved; both consents always require a fresh Yes.
 `python -m azure_bing_assistant install --reset-wizard` removes only this draft.
-It is automatically cleared only after successful full application deployment;
-it is not chat conversation storage. Answers from failures before this change
-cannot be recovered unless a draft already existed.
+The draft is retained until explicitly reset, including after successful deployment;
+it is not chat conversation storage. Non-interactive installations still require
+explicit flags and do not read or save this draft. Answers from older attempts
+cannot be recovered unless a draft already existed. Changing the installation
+name can create parallel billable resources rather than replace the previous ones.
 
 After final approval, `install` shows five real phases on **stderr**, for example
 `Phase 2/5 · Provisioning Azure resources · in progress · 01:15`.
@@ -224,10 +227,72 @@ reads subscriptions, resource groups, regions, model/SKU combinations, and roles
 from Azure, shows a plan, and asks before changing Azure. Answer **No** to optional
 document search for the simpler, lower-cost path.
 
+**Foundry access:** the plan includes conditional access repair after approval.
+Existing working SDK access bypasses IAM. Only an explicit Foundry HTTP 403
+triggers verification of that same SDK identity and the exact project, followed
+by an idempotent **Foundry User** grant at **project scope only** and a visible,
+bounded propagation wait of up to 10 minutes. Owner can normally authorize the
+grant; Contributor alone needs additional role-assignment permission. No broader
+role or unfiltered agent is used. If IAM permission is missing, ask an administrator.
+An exact structured `404 / NotFound / Project not found` instead triggers a
+readiness wait only after SDK identity and ARM tenant/project/account/endpoint
+verification, **without granting a role**. Other 404s fail immediately. A later
+403 can trigger IAM repair within the same bounded wait, not a new 10-minute window.
+After that verified project 404, a read-only permission probe reads one `agents.list`
+page with bounded timeouts and no automatic retries. Only an actual probe 403
+triggers IAM repair; a successful probe or project 404 alone never grants a role.
+See [automatic Foundry access and limits](docs/configuration.md#installer-foundry-access-en).
+
+**Three separate identities:** the operator's conditional Foundry User grant is
+project-scoped. Infrastructure provisioning assigns the same Foundry User role
+to the **Foundry project's managed identity on its own Foundry account**, alongside
+the unchanged **web-app managed identity grant on that account**. Neither managed
+identity grant is resource-group/subscription-wide; new template deployments
+include the project-identity assignment without a separate manual IAM step.
+
 Visitors need no client ID, application registration, or Entra login. Operator
 Azure access and the backend Managed Identity remain required. See
 [Configuration](docs/configuration.md#english) for dry-run, non-interactive
 installation, and document setup.
+
+### Failed installation: retry or clean restart
+
+On failure or Ctrl+C, the installer prints localized recovery guidance to stderr.
+The report **does not cancel, delete, purge, retry, or execute diagnostics**.
+Before provisioning, this attempt created nothing to remove; earlier resources
+may still exist. Prefer keeping `.azure` and the **same installation name**.
+Wait for active/conflicting operations; fix quota or access rather than deleting
+resources. Restore a matching recoverable deleted Foundry account when appropriate.
+With recognized, confirmed infrastructure outputs and a phase 4/5 failure,
+correct the error, check no deployment remains active, and resume locally:
+
+```powershell
+python -m azure_bing_assistant deploy --environment <installation-name> --ui-language en
+```
+
+A clean restart needs **separate explicit approval and verified exclusive ownership**.
+After backing up required data/configuration, consider only the dedicated web app,
+Foundry project/agent/model resources and account. **Delete the Foundry project
+before its account**; an existing project can cause `CannotDeleteResource`.
+Remove an App Service plan only if no other app uses it; consider dedicated
+Search/Storage only in `searchBlob`, with backups and data-loss approval.
+Never blanket-delete an existing/shared resource group. Purge is irreversible
+and requires separate approval for the exact, verified dedicated account; it is
+not an automatic fix. Inventories are **not deletion lists**.
+See [recovery and safe cleanup](docs/configuration.md#recovery-en).
+
+**Recreating Foundry after deletion/purge:** reusing an account/project name has
+been associated with persistent `Project not found` 404s ([reported issue](https://github.com/Azure/azure-dev/issues/8360),
+[merged naming-salt avoidance](https://github.com/Azure-Samples/azd-ai-starter-basic/pull/70)).
+For a deliberately approved fresh Foundry account, run
+`python -m azure_bing_assistant install --new-foundry-account --ui-language en`
+and keep the existing installation name and other wizard defaults. After approval,
+the installer saves `FOUNDRY_NAME_SALT` in the selected azd environment, not the
+wizard draft. **Omit the flag on retries** and keep `.azure` to reuse that generation;
+repeating the flag deliberately creates another account. Other resource names and
+the region are unchanged. Old accounts are never deleted automatically and can
+still consume quota/cost. This is a known avoidance strategy, not proof of an
+internal root cause or a guaranteed fix. See [fresh Foundry naming](docs/configuration.md#new-foundry-account-en).
 
 <a id="use-en"></a>
 
@@ -430,7 +495,8 @@ quindi «solo questo host» non è supportato e non viene trasformato in Sì.
 La lingua scelta per il chatbot controlla anche l'intero installer.
 Vedere gli [esempi di policy](docs/configuration.md#domini-uno-alla-volta) e le
 [risposte native nelle nove lingue](docs/configuration.md#languages);
-riavviare manualmente un wizard già aperto per caricare il codice aggiornato.
+il codice aggiornato si applica al prossimo processo. Lasciare terminare
+l'installer già in corso, senza interromperlo solo per caricare un aggiornamento.
 
 Formato, limiti e valori predefiniti sono mostrati prima delle risposte.
 Errori di menu, nomi, capacità o domini ripropongono solo il campo da correggere,
@@ -441,13 +507,15 @@ Ctrl+C/EOF annulla; termini e conferma finale mantengono No come predefinito.
 
 L'installer interattivo salva progressivamente le risposte valide in
 `.azure/installer-draft.json`, **file locale in chiaro da tenere privato**, escluso
-da Git. Dopo un errore, rieseguire `install`: Invio riusa i valori mostrati,
+da Git. Dopo successo, errore o annullamento, rieseguire `install`: Invio riusa i valori mostrati,
 riconvalidati contro le scelte Azure attuali. Credenziali, termini e conferma
 finale non sono salvati: i due consensi richiedono sempre un nuovo Sì.
 `python -m azure_bing_assistant install --reset-wizard` elimina solo questa bozza.
-La bozza si cancella automaticamente solo dopo la distribuzione completa riuscita;
-non è memoria delle conversazioni. Le risposte di errori precedenti a questa
-modifica non sono recuperabili se non esisteva già una bozza.
+La bozza resta fino al reset esplicito, anche dopo una distribuzione riuscita;
+non è memoria delle conversazioni. Le installazioni non interattive richiedono
+argomenti espliciti e non leggono né salvano la bozza. Le risposte di vecchi
+tentativi non sono recuperabili se non esisteva già una bozza. Cambiare nome
+all'installazione può creare risorse parallele a pagamento, non sostituire le precedenti.
 
 Dopo il Sì finale, `install` mostra su **stderr** cinque fasi reali con attività
 ed elapsed, ad esempio `Fase 2/5 · Creazione delle risorse Azure · in corso · 01:15`.
@@ -489,10 +557,75 @@ legge da Azure sottoscrizioni, gruppi, regioni, modelli/SKU e ruoli, mostra il p
 e chiede conferma prima di modificare Azure. Per il percorso più semplice e meno
 costoso, rispondere **No** alla ricerca documentale opzionale.
 
+**Accesso Foundry:** il piano include la correzione condizionale dopo l'approvazione.
+Se l'accesso SDK esistente funziona, non si accede a IAM. Solo un HTTP 403 esplicito
+da Foundry avvia la verifica della stessa identità SDK e del progetto esatto,
+l'assegnazione idempotente di **Foundry User sul solo progetto** e l'attesa visibile
+e limitata della propagazione, fino a 10 minuti. Owner può normalmente autorizzare
+l'assegnazione; Contributor da solo necessita di ulteriori permessi IAM. Nessun
+ruolo più ampio o agente senza filtro viene usato. Se manca il permesso IAM,
+rivolgersi a un amministratore.
+Un `404 / NotFound / Project not found` strutturato esatto avvia invece l'attesa
+di disponibilità solo dopo la verifica dell'identità SDK e di tenant/progetto/account/
+endpoint ARM, **senza assegnare ruoli**. Gli altri 404 falliscono subito. Un successivo
+403 può attivare la correzione IAM entro la stessa attesa limitata, senza altri 10 minuti.
+Dopo quel 404 di progetto verificato, un controllo permessi in sola lettura legge
+una pagina di `agents.list`, con timeout limitati e senza retry automatici. Solo
+un 403 effettivo del controllo attiva IAM; esito positivo o solo 404 non assegnano ruoli.
+Vedere [accesso Foundry automatico e limiti](docs/configuration.md#accesso-foundry-installer-it).
+
+**Tre identità distinte:** il ruolo Foundry User condizionale dell'operatore resta
+sul solo progetto. Il provisioning assegna lo stesso ruolo alla **Managed Identity
+del progetto Foundry sul proprio account Foundry**, accanto all'assegnazione
+invariata della **Managed Identity della web app sullo stesso account**. Nessuna
+di queste assegnazioni MI copre gruppo o sottoscrizione; i nuovi deployment del
+template includono il ruolo della MI del progetto senza un passaggio IAM manuale.
+
 Non servono client ID, registrazioni applicative o login Entra per i visitatori.
 L'accesso Azure dell'operatore e la Managed Identity del backend restano invece
 necessari. La guida completa, inclusi dry-run, installazione non interattiva e
 documenti, è in [Configurazione](docs/configuration.md#italiano).
+
+### Installazione fallita: riprovare o ripartire da zero
+
+In caso di errore o Ctrl+C, l'installer stampa su stderr indicazioni localizzate.
+Il report **non annulla, elimina, esegue purge, riprova né esegue diagnostica**.
+Prima del provisioning, questo tentativo non ha creato nulla da rimuovere;
+possono esistere risorse precedenti. Preferire lo **stesso nome di installazione**
+e conservare `.azure`. Attendere operazioni attive/in conflitto; correggere quota
+o accesso anziché eliminare risorse. Ripristinare l'account Foundry eliminato
+recuperabile corrispondente, quando appropriato. Con output infrastrutturali
+riconosciuti e confermati ed errore in fase 4/5, correggere l'errore, verificare
+che nessun deployment sia ancora attivo e riprendere localmente:
+
+```powershell
+python -m azure_bing_assistant deploy --environment <nome-installazione> --ui-language it
+```
+
+Una ripartenza pulita richiede **approvazione esplicita separata e uso esclusivo
+verificato**. Dopo il backup di dati/configurazioni necessari, considerare solo
+web app, progetto/agente/modello Foundry e account dedicati. **Eliminare il progetto
+Foundry prima dell'account**: un progetto ancora presente può causare
+`CannotDeleteResource`. Rimuovere il piano App Service solo se non usato da altre
+app; considerare Search/Storage dedicati solo in `searchBlob`, con backup e
+approvazione della perdita dati. Mai eliminare in blocco gruppi esistenti/condivisi.
+Il purge è irreversibile e richiede approvazione separata per l'account dedicato
+esatto verificato: non è una correzione automatica. Gli inventari **non sono liste
+di eliminazione**. Vedere [ripristino e pulizia sicura](docs/configuration.md#ripristino-it).
+
+**Ricreare Foundry dopo eliminazione/purge:** il riuso del nome account/progetto è
+stato associato a 404 `Project not found` persistenti ([segnalazione](https://github.com/Azure/azure-dev/issues/8360),
+[correzione con salt nei nomi integrata](https://github.com/Azure-Samples/azd-ai-starter-basic/pull/70)).
+Per un nuovo account Foundry deliberatamente approvato, eseguire
+`python -m azure_bing_assistant install --new-foundry-account --ui-language it`
+mantenendo nome installazione e altri predefiniti del wizard. Dopo l'approvazione,
+l'installer salva `FOUNDRY_NAME_SALT` nell'ambiente azd selezionato, non nella bozza.
+**Omettere il flag nei nuovi tentativi** e conservare `.azure` per riusare quella
+generazione; ripetere il flag crea deliberatamente un altro account. Nomi delle
+altre risorse e regione restano invariati. I vecchi account non vengono eliminati
+automaticamente e possono ancora consumare quota/costi. È una strategia nota
+per evitare il riuso, non una causa interna dimostrata o una soluzione garantita.
+Vedere [nuovo nome Foundry](docs/configuration.md#nuovo-account-foundry-it).
 
 <a id="uso-it"></a>
 

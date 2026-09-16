@@ -162,6 +162,7 @@ def _deployment_parameters(config: InstallerConfig) -> dict[str, dict[str, Any]]
     validate_websites(config.websites)
     values: dict[str, Any] = {
         "environmentName": config.environment_name,
+        "foundryNameSalt": config.foundry_name_salt,
         "resourceGroupName": config.resource_group_name or "",
         "createResourceGroup": config.create_resource_group,
         "location": config.location,
@@ -252,7 +253,7 @@ def _canonical_deployment_outputs(result: Mapping[str, Any]) -> dict[str, str]:
 class AzureArmClient:
     """Authenticated Azure Resource Manager transport without request logging."""
 
-    def __init__(self) -> None:
+    def __init__(self, credential: Any | None = None) -> None:
         try:
             from azure.core.pipeline import Pipeline
             from azure.core.pipeline.policies import (
@@ -267,7 +268,8 @@ class AzureArmClient:
                 "azure-identity and azure-core are required for provisioning"
             ) from exc
 
-        self._credential = DefaultAzureCredential()
+        self._owns_credential = credential is None
+        self._credential = DefaultAzureCredential() if credential is None else credential
         self._transport = RequestsTransport(
             connection_timeout=30,
             read_timeout=120,
@@ -292,10 +294,12 @@ class AzureArmClient:
                 raise
 
     def close(self) -> None:
-        self._transport.close()
-        close = getattr(self._credential, "close", None)
-        if callable(close):
-            close()
+        try:
+            self._transport.close()
+        finally:
+            close = getattr(self._credential, "close", None)
+            if self._owns_credential and callable(close):
+                close()
 
     def _send_json(
         self,
@@ -305,6 +309,8 @@ class AzureArmClient:
         body: Mapping[str, Any] | None = None,
         accepted: set[int] | None = None,
         operation: str,
+        retry_total: int | None = None,
+        request_timeout: float | None = None,
     ) -> tuple[int, dict[str, Any], Mapping[str, str]]:
         from azure.core.pipeline.transport import HttpRequest
 
@@ -315,7 +321,15 @@ class AzureArmClient:
             headers["Content-Type"] = "application/json"
         request = HttpRequest(method, url, headers=headers, data=encoded)
         try:
-            response = self._pipeline.run(request, stream=False).http_response
+            options = {} if retry_total is None else {"retry_total": retry_total}
+            if request_timeout is not None:
+                if request_timeout <= 0:
+                    raise ProvisioningError("The Azure request time budget expired before submission")
+                options.update(
+                    connection_timeout=min(30, request_timeout / 2),
+                    read_timeout=min(60, request_timeout / 2),
+                )
+            response = self._pipeline.run(request, stream=False, **options).http_response
             status = response.status_code
             raw = response.text()
         except Exception:

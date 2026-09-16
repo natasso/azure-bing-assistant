@@ -161,16 +161,87 @@ dall'accesso dei visitatori e restano necessarie.
   Blob Data Reader e Search Index Data Reader quando applicabili.
 - Sessioni `az` e `azd` con un account autorizzato nello stesso tenant.
 
-L'identità che esegue l'installer deve anche avere **Foundry User** (o permessi
-data-plane equivalenti, inclusa la scrittura degli agenti) sul progetto Foundry.
-**Owner** o **Contributor** da soli non concedono questi permessi. Il ruolo
-assegnato alla Managed Identity dell'app non autorizza l'installatore.
-Per un progetto nuovo, un amministratore può concedere il ruolo a uno scope
-superiore appropriato prima dell'installazione, oppure al solo progetto dopo la
-creazione delle risorse. Attendere la propagazione RBAC, che può richiedere
-diversi minuti, poi riprendere con
-`python -m azure_bing_assistant deploy --environment <nome-installazione> --ui-language it`.
-Questo comando riusa gli output salvati senza ricreare l'infrastruttura.
+<a id="accesso-foundry-installer-it"></a>
+
+#### Accesso Foundry dell'installatore: correzione automatica
+
+La configurazione degli agenti richiede **Foundry User** o permessi data-plane
+equivalenti, inclusa la scrittura degli agenti. Non occorre assegnare il ruolo
+manualmente in anticipo se l'installatore può gestire IAM. **Owner** e
+**Contributor** da soli non concedono questi permessi data-plane: Owner può
+normalmente consentire all'installer di assegnarli, mentre Contributor necessita
+anche di `Microsoft.Authorization/roleAssignments/write`, per esempio tramite
+User Access Administrator. Servono inoltre letture ARM di sottoscrizione, account,
+progetto e assegnazioni. Il ruolo della Managed Identity dell'app non autorizza
+l'installatore.
+
+**Tre identità, assegnazioni separate:**
+
+| Identità | Ruolo Foundry e scope | Gestione |
+|---|---|---|
+| Operatore, identificato dalla credenziale SDK | Foundry User sul **solo progetto verificato** | Correzione condizionale su 403 descritta sotto. |
+| Managed Identity del progetto (`project.identity.principalId`) | Foundry User sul **proprio account Foundry** | Assegnazione `projectFoundryUser` inclusa nel provisioning Bicep. |
+| Managed Identity della web app (`webPrincipalId`) | Foundry User sullo **stesso account Foundry** | Assegnazione `webFoundryUser` già esistente, invariata. |
+
+`infra/modules/foundry.bicep` usa lo stesso `cognitiveUserRoleDefinitionId` per le
+due Managed Identity, mai uno scope di gruppo o sottoscrizione. L'assegnazione
+alla MI del progetto implementa il [requisito minimo Foundry documentato](https://learn.microsoft.com/azure/foundry/concepts/rbac-foundry#minimum-role-assignments-to-get-started):
+i nuovi provisioning la includono, senza un passaggio IAM manuale separato.
+Non estende lo scope dell'operatore. Questi ruoli non dimostrano la causa di un 404:
+una lettura degli agenti riuscita non prova che creazione agente o inferenza modello
+funzionino; verificarle separatamente.
+
+Il piano include l'assegnazione **condizionale**. Dopo l'approvazione finale di
+`install`, e anche nel comando di ripresa `deploy`:
+
+1. Si prova prima la configurazione con le credenziali SDK già in uso.
+   **Se funziona, si evita IAM**: un'identità già autorizzata non necessita
+   di ulteriori permessi amministrativi per questa configurazione.
+   Un HTTP 404 con codice strutturato `NotFound` e messaggio esatto normalizzato
+   `Project not found` avvia invece l'attesa di disponibilità **solo dopo** le
+   verifiche di identità SDK e tenant/progetto/account/endpoint ARM descritte sotto.
+   **Il 404 non assegna ruoli.** Gli altri 404, inclusi quelli di modello/deployment,
+   falliscono subito; non basta trovare «not found» nel testo di un errore.
+   Solo dopo quel 404 verificato, `probe_project_access(timeout)` controlla i
+   permessi della stessa identità leggendo **una sola pagina di `agents.list`**,
+   con timeout entro il budget residuo e senza retry automatici della richiesta.
+   Solo un **403 effettivo del controllo** può attivare la correzione IAM:
+   un controllo riuscito o un puro 404 di progetto non assegnano ruoli.
+2. **Solo un HTTP 403 esplicito da Foundry** avvia la correzione IAM. La stessa
+   credenziale SDK ottiene token ARM e Foundry; gli identificatori `oid`/`tid`
+   devono coincidere. Token e claim identificativi non sono stampati né salvati
+   localmente. Non si presume che l'account attivo nella CLI sia questa identità.
+3. ARM verifica il tenant della sottoscrizione selezionata, il progetto nel gruppo
+   previsto, l'account e la corrispondenza dell'endpoint. Identità o risorse non
+   verificabili fermano la procedura senza assegnare ruoli.
+4. Solo nel percorso 403, si conferma o crea **Foundry User** per l'identità installatrice
+   sullo **scope esatto del progetto**, mai su gruppo o sottoscrizione. L'ID
+   deterministico rende l'assegnazione idempotente; le assegnazioni esistenti vengono
+   riconfermate. Assegnazioni condizionali o in conflitto non vengono sovrascritte;
+   un risultato incerto non provoca un secondo invio dell'assegnazione.
+5. Dopo la verifica ARM per il 404 specifico, oppure dopo la conferma IAM per il
+   403, l'installer attende con avanzamento localizzato su stderr: **un solo budget
+   fino a 10 minuti**, intervalli fino a 15 secondi e contatore limitato a 40 tentativi.
+   Riprova solo questi errori di configurazione e passa alle richieste il budget
+   residuo. Se dopo il 404 arriva un 403, esegue la correzione IAM condizionale senza
+   riavviare il timer. Errori diversi dai due casi riconosciuti o Ctrl+C interrompono
+   l'attesa; nessun filtro viene rimosso e nessuna risorsa viene eliminata.
+   Non è una stima della durata dell'intero deployment.
+
+Se mancano i permessi IAM, chiedere a un amministratore di concedere **Foundry User
+all'identità SDK installatrice sul solo progetto**. Deny assignment, policy di rete
+o del tenant possono richiedere un intervento amministrativo: un ruolo aggiuntivo
+non le aggira. Se il 403 persiste dopo l'attesa, verificare IAM, policy e propagazione.
+Se persiste il 404 di progetto, verificare provisioning Foundry e disponibilità
+dell'endpoint, senza eliminare risorse per aggirare l'attesa.
+Poi, dalla directory locale del progetto, riprendere:
+
+```powershell
+python -m azure_bing_assistant deploy --environment <nome-installazione> --ui-language it
+```
+
+Il comando riusa gli output salvati senza ricreare l'infrastruttura e applica la
+stessa correzione condizionale.
 
 I nomi di modello, versioni, SKU, capacità, sottoscrizioni e role definition ID
 negli esempi non sono valori convalidati: sostituirli con valori reali del tenant.
@@ -223,7 +294,8 @@ Il wizard:
 3. propone **Siti autorizzati** per impostazione predefinita e chiede se aggiungere
    Blob Storage e Azure AI Search;
 4. richiede l'accettazione di costi, termini e flusso dati Bing;
-5. mostra un piano e chiede conferma prima delle modifiche.
+5. mostra un piano, inclusa l'assegnazione condizionale Foundry User
+   all'installatore sul solo progetto in caso di 403, e chiede conferma prima delle modifiche.
 
 Alla prima esecuzione il selettore iniziale con nove etichette native propone **Italiano** premendo Invio. La lingua
 scelta controlla sia il chatbot sia tutte le domande, gli aiuti, i riepiloghi e
@@ -265,8 +337,9 @@ silenziosamente con il valore predefinito. Invio nelle domande sì/no accetta il
 valore mostrato: termini e conferma finale hanno **sempre No** come predefinito;
 il rifiuto interrompe l'installazione.
 Ctrl+C/EOF annulla anche durante una correzione. Gli argomenti non interattivi
-errati restano errori singoli, senza domande. Riavviare manualmente un wizard
-già aperto: con l'installazione editable non serve reinstallare il pacchetto.
+errati restano errori singoli, senza domande. Il codice aggiornato si carica nel
+prossimo processo: lasciare terminare l'installer già in corso, senza interromperlo
+per aggiornare. Con l'installazione editable non serve reinstallare il pacchetto.
 
 #### Riprendere le risposte dell'installer
 
@@ -280,12 +353,15 @@ policy sottodomini e avanzamento della raccolta. Non contiene credenziali,
 token, chiavi, risposte di servizi, ID di conversazioni o consensi; non legge `.env`.
 Non introduce sessioni runtime o memoria delle conversazioni.
 
-Dopo un errore o un annullamento, rieseguire lo stesso comando dalla stessa
+Dopo successo, errore o annullamento, rieseguire lo stesso comando dalla stessa
 directory: i campi mostrano i valori precedenti tra parentesi quadre e **Invio**
 li riusa dopo convalida. Senza `--ui-language`, la lingua salvata diventa il
 predefinito del selettore; un argomento esplicito cambia solo la lingua.
 I menu confrontano gli ID con l'individuazione Azure corrente, non gli indici:
 una scelta scomparsa viene segnalata e richiede una nuova selezione.
+Se il gruppo salvato non esiste più, può essere necessario scegliere la creazione
+di un nuovo gruppo. Cambiare nome all'installazione può creare risorse parallele
+a pagamento: non elimina né rinomina quelle del tentativo precedente.
 Cambiando tenant/sottoscrizione si eliminano i predefiniti dipendenti delle
 risorse; cambiando regione/modello si riconvalidano modello/capacità.
 Una capacità salvata fuori dai nuovi limiti viene segnalata, non corretta di nascosto.
@@ -298,21 +374,143 @@ restano No e continuano a bloccare l'installazione senza ampliare l'autorizzazio
 **Termini Bing e conferma finale richiedono sempre un nuovo Sì esplicito.**
 
 La bozza resta dopo errori di convalida finale, provider, provisioning o package
-deployment, rifiuti, Ctrl+C/EOF; viene eliminata solo dopo la distribuzione completa
-riuscita. Un errore nella sola eliminazione produce un avviso locale, non un falso
-fallimento Azure. Errori di lettura/salvataggio fermano invece l'installer.
-Per ripartire (anche con JSON corrotto o versione non supportata):
+deployment, rifiuti, Ctrl+C/EOF **e dopo la distribuzione completa riuscita**.
+Le risposte valide restano i predefiniti delle esecuzioni successive fino al reset
+esplicito. Errori di lettura/salvataggio fermano l'installer.
+Per scartare le risposte salvate (anche con JSON corrotto o versione non supportata):
 
 ```powershell
 python -m azure_bing_assistant install --reset-wizard
 ```
 
-Il comando elimina **solo** la bozza, non ambienti/configurazioni azd o login.
+Il comando elimina **solo** la bozza, non risorse Azure, ambienti/configurazioni
+azd o login. Per riprovare conservando i valori, non eliminare `.azure`.
 Non è combinabile con `--non-interactive`/`--dry-run`. Questi percorsi, `doctor`,
 `plan`, `provision`, `deploy` e `--help` non leggono né scrivono la bozza.
+L'installazione non interattiva continua a richiedere argomenti espliciti.
 Sono recuperabili solo risposte salvate dopo questa modifica: nessun recupero
-retroattivo di una vecchia esecuzione fallita senza bozza. Riavviare manualmente
-un wizard già aperto per caricare il codice aggiornato.
+retroattivo di una vecchia esecuzione fallita senza bozza. Le modifiche valgono dal
+prossimo processo: attendere che l'installer in corso termini prima di avviarlo
+nuovamente, senza interromperlo per caricare l'aggiornamento.
+
+<a id="ripristino-it"></a>
+
+#### Errore di installazione e ripartenza pulita
+
+In caso di errore o Ctrl+C, `install` stampa un report localizzato su **stderr**.
+Il report è solo informativo: **non esegue diagnostica, annullamenti, eliminazioni,
+purge o nuovi tentativi**. Prima del provisioning, questo tentativo non ha creato
+risorse Azure; possono comunque esistere risorse di tentativi precedenti.
+
+- **Prima scelta: conservare le risorse**, `.azure` e lo stesso nome di installazione.
+  Le operazioni remote possono continuare dopo un errore o Ctrl+C: attendere uno
+  stato terminale prima di riprovare con un deployment incrementale.
+- Per conflitti, confrontare stato e timestamp delle operazioni della distribuzione
+  principale e di quella annidata Foundry. Non avviare un deployment concorrente.
+- Per quota/capacità, richiedere quota, ridurre la capacità o scegliere un
+  modello/regione supportato: eliminare risorse non è una soluzione generale.
+- Per `FlagMustBeSetForRestore`/soft-delete, verificare e ripristinare l'account
+  recuperabile corrispondente quando appropriato. Nessun purge è automatico.
+- Il 403 Foundry attiva la [correzione IAM condizionale](#accesso-foundry-installer-it).
+  Se manca il permesso IAM, serve un amministratore; non ampliare i ruoli né
+  rimuovere le restrizioni sui domini per aggirare un diniego.
+
+In fase 4/5 (agente/settings o pacchetto/app), il report propone la ripresa solo
+se gli output confermati del tentativo identificano web app, account e progetto
+con i prefissi attesi. Correggere prima l'errore e verificare che nessun deployment
+sia attivo. Il comando locale equivalente, con lingua esplicita, è:
+
+```powershell
+python -m azure_bing_assistant deploy --environment <nome-installazione> --ui-language it
+```
+
+Altrimenti diagnosticare prima, poi rieseguire `install` con i predefiniti
+conservati e nuova approvazione: output mancanti non sono una ripresa sicura.
+
+**Ripartenza pulita: solo con approvazione esplicita separata e uso esclusivo
+verificato.** Prima attendere la fine di tutte le operazioni e salvare i dati e
+le configurazioni necessari. Le risorse seguenti sono candidati da verificare,
+non una lista di eliminazione già autorizzata:
+
+| Risorsa dedicata | Condizione e ordine |
+|---|---|
+| Web app | Solo quella di questa installazione. |
+| Progetto Foundry e risorse agente | Dopo il backup necessario, eliminare il progetto prima dell'account e attendere la fine dell'operazione. |
+| Deployment modello e account Foundry | Verificare i deployment dedicati e rimuoverli se necessario; eliminare l'account solo dopo il progetto. Un progetto ancora presente può causare `CannotDeleteResource`. |
+| Piano App Service | Solo se nessun'altra app lo usa; verificare il nome e gli utilizzatori. |
+| Azure AI Search e Storage | Solo in `searchBlob` e solo se dedicati, con backup e approvazione esplicita della perdita di indice/documenti. Mai dati condivisi. |
+
+**Mai eliminare in blocco un gruppo esistente o condiviso.** Nomi simili, tag e
+opzione «crea gruppo» non provano l'uso esclusivo. Il soft-delete può riservare il
+nome dell'account dopo la rimozione: preferire il ripristino quando appropriato.
+Il **purge è irreversibile** e richiede un'approvazione separata per l'esatto nome
+dell'account verificato come dedicato, dopo aver valutato backup e perdita dati.
+L'approvazione dell'installazione o della normale eliminazione non approva il purge;
+l'installer non lo esegue.
+
+Il report indica nomi riconosciuti negli output confermati correnti oppure
+«Sconosciuto»; i nomi di agente, modello e piano richiedono un'ispezione separata.
+Propone comandi PowerShell **in sola lettura**, non eseguiti, per stato/operazioni
+della distribuzione di sottoscrizione e annidata `foundry`, inventario del gruppo,
+account eliminati e log di deployment della web app quando identificata.
+Confrontare sempre i timestamp: una distribuzione annidata può riferirsi a un
+tentativo precedente. **Gli inventari includono risorse estranee e non sono liste
+di eliminazione.** Controllare e oscurare l'output prima di condividerlo.
+`install --reset-wizard` azzera solo le risposte locali, mai Azure; termini Bing e
+approvazione finale richiedono comunque un nuovo Sì.
+
+<a id="nuovo-account-foundry-it"></a>
+
+#### Ricreazione Foundry: evitare il riuso del nome
+
+Dopo eliminazione e purge, ricreare un account/progetto con lo stesso nome può
+essere associato a `Project not found` 404 persistenti, anche quando ARM mostra
+il progetto come creato. [Azure/azure-dev #8360](https://github.com/Azure/azure-dev/issues/8360)
+descrive il caso; la [PR Azure-Samples #70, integrata](https://github.com/Azure-Samples/azd-ai-starter-basic/pull/70)
+introduce un salt nei nomi per evitarne il riuso. È evidenza di una strategia
+nota, **non una diagnosi interna garantita per ogni 404**, né una prova che un
+deployment specifico sia completato.
+
+Se si sceglie deliberatamente una nuova generazione Foundry dopo la rimozione
+dell'account, attendere la fine delle operazioni, verificare backup e pulizia
+autorizzata, poi avviare dalla directory del progetto:
+
+```powershell
+python -m azure_bing_assistant install --new-foundry-account --ui-language it
+```
+
+- Mantenere lo **stesso nome di installazione** e i normali predefiniti salvati.
+  Il piano esplicita il nuovo account; solo dopo l'approvazione viene generato
+  un salt di **32 cifre esadecimali minuscole**, salvato come `FOUNDRY_NAME_SALT`
+  nell'ambiente azd selezionato, **non** in `.azure/installer-draft.json`.
+- Il parametro Bicep `foundryNameSalt` ha default vuoto: senza salt conserva i
+  nomi precedenti. Con salt cambia il nome dell'account Foundry e quindi il
+  percorso del progetto e dei deployment modello che contiene. Non rinomina
+  web app, gruppo, piano App Service, Search o Storage; non cambia regione né
+  aggiunge capability host. Le scelte di modello/capacità restano quelle approvate.
+- **Nei retry omettere `--new-foundry-account`**: `install` riusa la generazione
+  salvata. Conservare l'ambiente `.azure` per aggiornamenti stabili.
+  `--reset-wizard` azzera le risposte, non questa generazione. Ripetere il flag
+  significa chiedere deliberatamente un altro account, non riprendere il precedente.
+- Nessun account precedente viene eliminato o sottoposto a purge automaticamente.
+  Se resta attivo può consumare quota e generare costi aggiuntivi. La sua pulizia
+  richiede verifica dell'uso esclusivo, backup e approvazione esplicita separata;
+  eliminare il progetto prima dell'account. **Non usare il purge come correzione
+  automatica** e non eliminare gruppi condivisi.
+- Aggiungere il flag a `install --non-interactive --dry-run`, con tutti gli altri
+  argomenti espliciti richiesti, mostra l'intenzione offline: **non genera UUID/salt,
+  non lo salva e non modifica Azure**. Il salt non è una credenziale; termini Bing
+  e approvazione finale restano necessari per un'installazione effettiva.
+
+Per un normale retry, senza creare un'altra generazione:
+
+```powershell
+python -m azure_bing_assistant install --ui-language it
+```
+
+La verifica SDK/ARM, il controllo permessi in sola lettura, l'IAM condizionale e
+l'attesa limitata restano attivi. Un nuovo nome non garantisce disponibilità del
+servizio, compatibilità del modello o successo del deployment.
 
 #### Domini, uno alla volta
 
@@ -336,8 +534,8 @@ Le risposte italiane accettate sono `s`, `si`, `sì`, `n`, `no` (anche `y`/`yes`
 per compatibilità). Le altre otto lingue accettano le rispettive
 [risposte native](#languages). Invio usa il valore mostrato, **sempre No per termini e conferma finale**;
 una risposta sì/no non valida ripropone la stessa domanda. EOF o interruzione
-annullano senza proseguire. Il wizard già aperto va **riavviato manualmente**
-per caricare queste modifiche.
+annullano senza proseguire. Queste modifiche si caricano al prossimo avvio:
+**lasciare terminare l'installer in corso** prima di avviarne uno nuovo.
 
 Esempio del segmento domini, due domini con policy supportate:
 
@@ -429,8 +627,9 @@ I comandi effettivi usano la distribuzione corrente e, se identificato nella
 risposta già ricevuta, il deployment annidato; **non vengono eseguiti automaticamente**.
 Output diagnostico manuale da controllare e oscurare prima di condividerlo.
 Timeout o stato mancante non diventano una diagnosi quota/conflitto.
-Riavviare manualmente un processo già aperto per caricare il codice aggiornato;
-con il checkout editable non occorre reinstallare.
+Il codice aggiornato si carica nel prossimo processo: lasciare terminare quello
+in corso, senza interromperlo per aggiornare; con il checkout editable non occorre
+reinstallare.
 
 Se le operazioni riportano `FlagMustBeSetForRestore`, il nome Foundry appartiene
 a un account eliminato ma recuperabile. Un amministratore deve verificare
@@ -1504,15 +1703,86 @@ visitor access and remain required.
   Data Reader, and Search Index Data Reader roles when applicable.
 - `az` and `azd` sessions using an authorized account in the same tenant.
 
-The installing identity also needs **Foundry User** (or equivalent data-plane
-permissions, including agent write) on the Foundry project. **Owner** or
-**Contributor** alone do not grant these permissions. The role assigned to the
-application's managed identity does not authorize the installer.
-For a new project, an administrator can grant access at an appropriate parent
-scope before installation, or at project scope after resource provisioning.
-Allow RBAC assignments to propagate, which can take several minutes, then resume
-with `python -m azure_bing_assistant deploy --environment <installation-name> --ui-language en`.
-This command reuses saved outputs without reprovisioning infrastructure.
+<a id="installer-foundry-access-en"></a>
+
+#### Installer Foundry access: automatic repair
+
+Agent configuration needs **Foundry User** or equivalent data-plane permissions,
+including agent write. You do not need to assign the role manually beforehand if
+the installer can manage IAM. **Owner** and **Contributor** alone do not grant
+these data-plane permissions: Owner normally lets the installer assign them,
+whereas Contributor also needs `Microsoft.Authorization/roleAssignments/write`,
+for example through User Access Administrator. ARM reads of the subscription,
+account, project and assignments are also required. The application's managed
+identity role does not authorize the installer.
+
+**Three identities, separate assignments:**
+
+| Identity | Foundry role and scope | Management |
+|---|---|---|
+| Operator identified by the SDK credential | Foundry User on the **verified project only** | Conditional 403 repair described below. |
+| Project managed identity (`project.identity.principalId`) | Foundry User on **its own Foundry account** | `projectFoundryUser` assignment included in Bicep provisioning. |
+| Web-app managed identity (`webPrincipalId`) | Foundry User on the **same Foundry account** | Existing `webFoundryUser` assignment, unchanged. |
+
+`infra/modules/foundry.bicep` uses the same `cognitiveUserRoleDefinitionId` for both
+managed identities, never resource-group or subscription scope. The project-MI
+assignment implements the [documented Foundry minimum requirement](https://learn.microsoft.com/azure/foundry/concepts/rbac-foundry#minimum-role-assignments-to-get-started):
+new provisioning includes it without a separate manual IAM step. It does not
+broaden the operator's scope. These roles do not establish the cause of a 404:
+successful agent listing does not prove agent creation or model inference works;
+validate them separately.
+
+The plan includes this **conditional** assignment. After `install` final approval,
+and also when resuming with `deploy`:
+
+1. Configuration is first attempted with the SDK credentials already in use.
+   **Working access bypasses IAM**: an already authorized identity does not need
+   additional administrative permissions for this configuration.
+   An HTTP 404 with structured code `NotFound` and the exact normalized message
+   `Project not found` instead starts a readiness wait **only after** the SDK
+   identity and ARM tenant/project/account/endpoint checks described below.
+   **The 404 grants no role.** Other 404s, including model/deployment-not-found
+   errors, fail immediately; matching “not found” somewhere in error text is insufficient.
+   Only after that verified 404, `probe_project_access(timeout)` checks the same
+   identity's permissions by reading **one page of `agents.list`**, with timeouts
+   within the remaining budget and no automatic request retries. Only an **actual
+   403 from this read-only probe** can trigger IAM repair: a successful probe or
+   a pure project 404 never grants a role.
+2. **Only an explicit Foundry HTTP 403** starts IAM repair. The same SDK credential
+   obtains ARM and Foundry tokens; their `oid`/`tid` identifiers must agree.
+   Tokens and extracted identity claims are not printed or saved locally.
+   The active CLI account is not assumed to be this identity.
+3. ARM verifies the selected subscription's tenant, the project in the expected
+   resource group, the account and the endpoint match. Unverifiable identities
+   or resources stop the procedure without assigning roles.
+4. Only on the 403 path, the built-in **Foundry User** role is confirmed or created for the installing
+   identity at the **exact project scope**, never the resource group or subscription.
+   A deterministic ID makes the grant idempotent; existing assignments are
+   reconfirmed. Conditional or conflicting assignments are not overwritten;
+   an uncertain result does not cause a second assignment submission.
+5. After ARM verification for the specific 404, or IAM confirmation for a 403,
+   the installer waits with localized stderr progress: **one shared budget of up
+   to 10 minutes**, intervals of up to 15 seconds and a counter capped at 40 attempts.
+   It retries only these configuration errors and passes requests the remaining
+   budget. A later 403 after the 404 triggers conditional IAM repair without
+   restarting the timer. Errors outside these two recognized cases or Ctrl+C stop
+   the wait; domain filtering is never weakened and no resource is deleted.
+   This is not an estimate of the entire deployment's duration.
+
+If IAM permission is missing, ask an administrator to grant **Foundry User to the
+installing SDK identity on this project only**. Deny assignments, network or tenant
+policies may require administrator action: adding a role does not bypass them.
+If the 403 persists after the wait, check IAM, policies and propagation.
+If the project 404 persists, check Foundry provisioning and endpoint availability;
+do not delete resources to work around the wait.
+Then resume from the local project directory:
+
+```powershell
+python -m azure_bing_assistant deploy --environment <installation-name> --ui-language en
+```
+
+This command reuses saved outputs without reprovisioning infrastructure and
+applies the same conditional repair.
 
 Model names, versions, SKUs, capacities, subscriptions, and role definition IDs
 in examples are not validated values. Replace them with real target-tenant
@@ -1565,7 +1835,8 @@ The wizard:
 3. defaults to **Authorized websites** and asks whether to add Blob Storage and Azure
    AI Search;
 4. requires acknowledgement of Bing costs, terms, and data flow;
-5. shows a plan and asks before making changes.
+5. shows a plan, including conditional project-only Foundry User assignment to
+   the installer on a 403, and asks before making changes.
 
 On the first run, the nine-language picker uses native labels and defaults to **Italiano** on Enter. The selected
 language controls both the chatbot and all installer questions, guidance,
@@ -1604,8 +1875,9 @@ available. Invalid capacity repeats only that question, without silently
 substituting the default. Enter accepts the displayed yes/no default;
 terms and final approval **always default to No**. Declining either stops installation.
 Ctrl+C/EOF cancels even during a correction. Invalid non-interactive arguments
-still fail once, without prompting. Manually restart an already running wizard;
-an editable installation does not require reinstalling the package.
+still fail once, without prompting. Updated code loads in the next process:
+let an already running installer finish rather than interrupting it to update.
+An editable installation does not require reinstalling the package.
 
 #### Resuming installer answers
 
@@ -1619,12 +1891,15 @@ progress. It contains no credentials, tokens, keys, service outputs, conversatio
 IDs or consents, and does not read `.env`. It does not add runtime chat sessions
 or conversation storage.
 
-After failure or cancellation, rerun the same command from the same directory.
+After success, failure, or cancellation, rerun the same command from the same directory.
 Fields show previous values in brackets; **Enter** reuses them after validation.
 Without `--ui-language`, the saved language becomes the picker's default; an
 explicit argument overrides only language. Menus match stable IDs against current
 Azure discovery, not numeric positions. Removed choices are explained and require
-a fresh selection. Changing tenant/subscription clears dependent resource defaults;
+a fresh selection. If the saved resource group no longer exists, you may need to
+choose to create a new group. Changing the installation name may create parallel
+billable resources: it does not delete or rename the previous attempt's resources.
+Changing tenant/subscription clears dependent resource defaults;
 changing region/model revalidates model/capacity. An out-of-range saved capacity
 is explained, never silently clamped.
 
@@ -1636,21 +1911,141 @@ without broadening authorization. **Bing terms and final approval always require
 a fresh explicit Yes.**
 
 The draft survives final configuration, provider, provisioning or package
-deployment failures, refusals and Ctrl+C/EOF. It is cleared only after successful
-full application deployment. Cleanup-only failure produces a local warning, not
-a false Azure deployment failure; read/save failures stop the installer.
-To start again, including after corrupt JSON or an unsupported version:
+deployment failures, refusals and Ctrl+C/EOF **and successful full application
+deployment**. Valid answers remain defaults for subsequent runs until explicitly
+reset. Read/save failures stop the installer.
+To discard saved answers, including after corrupt JSON or an unsupported version:
 
 ```powershell
 python -m azure_bing_assistant install --reset-wizard
 ```
 
-This removes **only** the draft, not azd environments/configuration or sign-ins.
+This removes **only** the draft, not Azure resources, azd environments/configuration
+or sign-ins. Do not delete `.azure` when retrying with saved values.
 It cannot be combined with `--non-interactive`/`--dry-run`. Those paths, `doctor`,
 `plan`, `provision`, `deploy` and `--help` do not read or write the draft.
+Non-interactive installation still requires explicit flags.
 Only answers saved after this change can persist: an older failed invocation
-without a draft cannot be recovered retrospectively. Manually restart an already
-open wizard to load the updated code.
+without a draft cannot be recovered retrospectively. Changes apply to the next
+process: wait for the running installer to finish before starting it again;
+do not interrupt it to load the update.
+
+<a id="recovery-en"></a>
+
+#### Installation failure and clean restart
+
+On failure or Ctrl+C, `install` prints a localized report to **stderr**. The report
+is informational only: **no diagnostics, cancellations, deletions, purges or retries
+are executed**. Before provisioning, this attempt created no Azure resources;
+resources from earlier attempts may still exist.
+
+- **First choice: keep the resources**, `.azure` and the same installation name.
+  Remote operations can continue after failure or Ctrl+C: wait for a terminal
+  state before retrying an incremental deployment.
+- For conflicts, compare status and timestamps of parent and nested Foundry
+  deployment operations. Do not start a concurrent deployment.
+- For quota/capacity, request quota, reduce capacity or choose a supported
+  model/region: deleting resources is not a general solution.
+- For `FlagMustBeSetForRestore`/soft-delete, inspect and restore the matching
+  recoverable account when appropriate. Purging is never automatic.
+- Foundry 403 triggers [conditional IAM repair](#installer-foundry-access-en).
+  If IAM permission is missing, an administrator is needed; do not broaden roles
+  or remove domain restrictions to work around a denial.
+
+At phase 4/5 (agent/settings or package/app), the report offers resume only when
+this attempt's confirmed outputs identify the web app, account and project with
+the expected prefixes. First fix the error and check no deployment is active.
+The equivalent local command with explicit language is:
+
+```powershell
+python -m azure_bing_assistant deploy --environment <installation-name> --ui-language en
+```
+
+Otherwise diagnose first, then rerun `install` using retained defaults and fresh
+approval: missing outputs do not establish a safe deployment-only resume.
+
+**Clean restart: separate explicit approval and verified exclusive ownership
+only.** First wait for all operations to finish and back up required data and
+configuration. The following are candidates to inspect, not a pre-authorized
+deletion list:
+
+| Dedicated resource | Condition and order |
+|---|---|
+| Web app | Only the app belonging to this installation. |
+| Foundry project and agent resources | After necessary backups, delete the project before the account and wait for completion. |
+| Model deployment and Foundry account | Inspect dedicated deployments and remove them if needed; delete the account only after the project. An existing project can cause `CannotDeleteResource`. |
+| App Service plan | Only if no other app uses it; inspect its name and consumers. |
+| Azure AI Search and Storage | Only in `searchBlob` and only if dedicated, with backups and explicit approval for losing indexed content/documents. Never shared data. |
+
+**Never blanket-delete an existing or shared resource group.** Similar names, tags
+and the “create group” option do not prove exclusive ownership. Soft-delete may
+reserve an account name after removal: prefer restoration when appropriate.
+**Purge is irreversible** and requires separate approval for the exact named
+account verified as dedicated, after considering backups and data loss.
+Installation approval or ordinary deletion approval does not approve purging;
+the installer never performs it.
+
+The report shows names recognized in current confirmed outputs or “Unknown”;
+agent, model and plan names require separate inspection. It suggests **read-only**
+PowerShell commands, not executed, for subscription/nested `foundry` deployment
+status and operations, group inventory, deleted accounts and web-app deployment
+logs when the app is identified. Always compare timestamps: a nested deployment
+may describe an earlier attempt. **Inventories include unrelated resources and
+are not deletion lists.** Review/redact output before sharing it.
+`install --reset-wizard` resets only local answers, never Azure resources; Bing
+terms and final approval still require a fresh Yes.
+
+<a id="new-foundry-account-en"></a>
+
+#### Recreating Foundry: avoid reusing the account name
+
+After deletion and purge, recreating an account/project with the same name can
+be associated with persistent `Project not found` 404s even when ARM shows the
+project as created. [Azure/azure-dev #8360](https://github.com/Azure/azure-dev/issues/8360)
+reports this case; [merged Azure-Samples PR #70](https://github.com/Azure-Samples/azd-ai-starter-basic/pull/70)
+adds a naming salt to avoid reuse. This supports a known avoidance strategy,
+**not a guaranteed internal diagnosis for every 404**, nor evidence that a
+particular deployment has completed.
+
+If you deliberately choose a fresh Foundry generation after account removal,
+wait for operations to finish, verify backups and authorized cleanup, then run
+from the project directory:
+
+```powershell
+python -m azure_bing_assistant install --new-foundry-account --ui-language en
+```
+
+- Keep the **same installation name** and normal saved wizard defaults. The plan
+  identifies the new-account intent; only after approval is a **32-character
+  lowercase hexadecimal** salt generated and saved as `FOUNDRY_NAME_SALT` in the
+  selected azd environment, **not** in `.azure/installer-draft.json`.
+- Bicep parameter `foundryNameSalt` defaults to empty: no salt preserves legacy
+  names. A salt changes the Foundry account name and therefore the resource paths
+  of its project and model deployments. It does not rename the web app, resource
+  group, App Service plan, Search or Storage; it does not change region or add
+  capability hosts. Model/capacity choices remain those approved.
+- **Omit `--new-foundry-account` on retries**: `install` reuses the saved generation.
+  Keep the `.azure` environment for stable updates. `--reset-wizard` resets answers,
+  not this generation. Repeating the flag deliberately requests another account,
+  rather than resuming the previous one.
+- Old accounts are never deleted or purged automatically. If still active, they
+  can consume quota and incur additional costs. Cleaning them up requires verified
+  exclusive ownership, backups and separate explicit approval; delete the project
+  before the account. **Do not purge as an automatic fix** or delete shared groups.
+- Adding the flag to `install --non-interactive --dry-run`, with all other required
+  explicit arguments, displays intent offline: **no UUID/salt is generated or saved,
+  and no Azure writes occur**. The salt is not a credential; Bing terms and final
+  approval remain required for an actual installation.
+
+For a normal retry without creating another generation:
+
+```powershell
+python -m azure_bing_assistant install --ui-language en
+```
+
+SDK/ARM verification, the read-only permission probe, conditional IAM repair and
+bounded wait still apply. A fresh name does not guarantee service readiness,
+model compatibility or deployment success.
 
 #### Domains, one at a time
 
@@ -1673,8 +2068,8 @@ subdomain exclusion**.
 English answers accept `y`, `yes`, `n`, `no`; the other eight languages accept
 their [native yes/no inputs](#languages) too. Enter accepts the displayed default,
 **always No for terms and final approval**; an invalid yes/no answer repeats the same question. EOF or
-interruption cancels without continuing. **Manually restart** an already open
-wizard to load these changes.
+interruption cancels without continuing. These changes load at the next start:
+**let the running installer finish** before starting a new process.
 
 Example domain segment with two supported policies:
 
@@ -1765,8 +2160,8 @@ Actual commands target the current deployment and any nested deployment
 identified in the response already received; **they are never run automatically**.
 Review/redact manual diagnostic output before sharing it. Missing state or
 timeout is not reinterpreted as a quota/conflict diagnosis.
-Manually restart an already running process to load the update; no reinstall
-is needed for the editable checkout.
+Updated code loads in the next process: let the current process finish rather
+than interrupting it to update. No reinstall is needed for the editable checkout.
 
 If operations report `FlagMustBeSetForRestore`, the Foundry name belongs to a
 soft-deleted, recoverable account. An administrator must inspect the deleted

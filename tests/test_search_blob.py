@@ -417,6 +417,7 @@ def test_official_sdk_writer_creates_confirmed_agent_version():
     writer = FoundrySdkWriter.__new__(FoundrySdkWriter)
     writer.project = SimpleNamespace(connections=Connections(), agents=Agents())
     writer.model_deployment_name = "chat-model"
+    writer.configuration_timeout = 60
 
     status = writer.configure_agent(
         "assistant",
@@ -426,6 +427,8 @@ def test_official_sdk_writer_creates_confirmed_agent_version():
 
     assert status == "created"
     assert captured["agent_name"] == "assistant"
+    assert captured["retry_total"] == 0
+    assert 0 < captured["connection_timeout"] <= 30
     assert captured["definition"].model == "chat-model"
     assert type(captured["definition"].tools[0]).__name__ == "WebSearchTool"
 

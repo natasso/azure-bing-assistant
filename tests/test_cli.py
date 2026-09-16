@@ -71,7 +71,10 @@ def test_install_progress_tracks_real_boundaries_and_keeps_stdout_json(
                 values[argv[3]] = argv[4]
 
         def get_environment_values(self, _):
-            observe(3, "read confirmed")
+            observe(
+                1 if len(displays) == 1 else 3,
+                "read name generation" if len(displays) == 1 else "read confirmed",
+            )
             return values
 
     def provision(_config):

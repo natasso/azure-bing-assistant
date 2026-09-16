@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import uuid
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -25,13 +26,16 @@ from .config import (
     InstallerConfig,
     KnowledgeMode,
     validate_ui_language,
+    validate_foundry_name_salt,
     validate_websites,
 )
 from .ingestion import document_upload_guidance
 from .installer_messages import InstallerMessageError, InstallerMessages
 from .install_progress import InstallProgress
+from .installer_access import ACCESS_MESSAGES, FOUNDRY_USER_ROLE_ID, configure_with_project_access
 from .localization import SUPPORTED_UI_LANGUAGES
 from .provision import AzureProvisioner, DeploymentFailedError, ProvisioningError, provision_argv
+from .recovery import format_recovery
 from .search_blob import AzureRestClient, SearchBlobOrchestrator, SearchBlobSettings
 from .wizard import (
     AzureCliDiscovery, CapabilityError, ConsolePrompts, DiscoveryError,
@@ -106,13 +110,27 @@ def _commands(config: InstallerConfig, action: str) -> list[list[str]]:
     return [*setup, provision, ["azd", "deploy", "web", *common]]
 
 
-def _plan(config: InstallerConfig) -> int:
+def _plan(config: InstallerConfig, new_foundry_account: bool = False) -> int:
     validate_websites(config.websites)
     search_configured = config.knowledge_mode is KnowledgeMode.SEARCH_BLOB
     payload = {
         "command": "plan",
         "dryRun": True,
         "config": config.public_parameters(),
+        "foundryAccountNaming": {
+            "newGenerationAfterApproval": new_foundry_account,
+            "reuseSavedGenerationByDefault": True,
+            "environmentVariable": "FOUNDRY_NAME_SALT",
+            "deleteExistingAccounts": False,
+            "changesWebAppOrResourceGroupNames": False,
+            "mayRequireAdditionalQuotaAndCost": new_foundry_account,
+            "warning": (
+                "A new Foundry account name will be generated after approval and saved for retries. "
+                "Existing Foundry accounts are not deleted; web app and resource group names stay unchanged."
+                if new_foundry_account else
+                "Create a new Foundry account name for a clean installation; preserve the saved name generation for normal retries."
+            ),
+        },
         "commands": _commands(config, "plan"),
         "environment": {
             "probe": ["azd", "env", "list", "--output", "json"],
@@ -130,6 +148,16 @@ def _plan(config: InstallerConfig) -> int:
             "parameters": "non-secret in-memory request body",
         },
         "postDeploy": {
+            "installerProjectAccess": {
+                "condition": "explicit Foundry HTTP 403 only",
+                "identity": "same SDK credential, verified ARM and Foundry token oid/tid",
+                "roleDefinitionId": FOUNDRY_USER_ROLE_ID,
+                "scope": "exact verified Foundry project only",
+                "requires": "roleAssignments/write and resource read",
+                "maxPropagationSeconds": 600,
+                "maxConfigurationAttempts": 40,
+                "broaderRoleFallback": False,
+            },
             "attachFilteredWebSearch": True,
             "websiteEnforcement": "allowed_domains",
             "attachSearchTool": search_configured,
@@ -149,7 +177,9 @@ def _plan(config: InstallerConfig) -> int:
     return 0
 
 
-def _interactive_plan(config: InstallerConfig, prompts: ConsolePrompts) -> None:
+def _interactive_plan(
+    config: InstallerConfig, prompts: ConsolePrompts, new_foundry_account: bool = False,
+) -> None:
     validate_websites(config.websites)
     tr = prompts.messages
     prompts.output(tr("Installation plan (no changes yet):"))
@@ -179,6 +209,31 @@ def _interactive_plan(config: InstallerConfig, prompts: ConsolePrompts) -> None:
         "configure filtered web_search and optional document search, synchronize settings, "
         "deploy the application."
     ))
+    prompts.output(tr(ACCESS_MESSAGES[0]))
+    if new_foundry_account:
+        prompts.output(tr(
+            "A new Foundry account name will be generated after approval and saved for retries. "
+            "Existing Foundry accounts are not deleted; web app and resource group names stay unchanged."
+        ))
+
+
+def _resolve_foundry_name_generation(
+    runner: AzdRunner, config: InstallerConfig, new_foundry_account: bool = False,
+) -> InstallerConfig:
+    try:
+        saved = runner.get_environment_values(config.environment_name)
+    except AzdError as exc:
+        raise ConfigurationError(
+            "Saved Foundry name generation could not be read safely; no new Azure deployment was started."
+        ) from exc
+    if not isinstance(saved, Mapping):
+        raise ConfigurationError(
+            "Saved Foundry name generation could not be read safely; no new Azure deployment was started."
+        )
+    salt = validate_foundry_name_salt(saved.get("FOUNDRY_NAME_SALT", ""))
+    if new_foundry_account:
+        salt = uuid.uuid4().hex
+    return replace(config, foundry_name_salt=salt)
 
 
 def _required_environment(
@@ -472,13 +527,25 @@ def _configure_post_deploy(
             SearchBlobOrchestrator(search_client, settings).configure()
             search_index = settings.index_name
             search_connection = resolved.search_connection_name
-        AgentToolOrchestrator(
+        orchestrator = AgentToolOrchestrator(
             foundry_writer,
             agent_name=config.chatbot_name or _DEFAULT_AGENT_NAME,
-        ).configure_tools(
-            allowed_domains=config.websites,
-            search_index_name=search_index,
-            search_connection_name=search_connection,
+        )
+
+        def configure(timeout: float):
+            foundry_writer.configuration_timeout = timeout
+            return orchestrator.configure_tools(
+                allowed_domains=config.websites,
+                search_index_name=search_index,
+                search_connection_name=search_connection,
+            )
+
+        configure_with_project_access(
+            configure, credential, config.subscription_id or "",
+            config.resource_group_name or "", resolved.foundry_project_endpoint,
+            config.ui_language or DEFAULT_UI_LANGUAGE,
+            lambda message: print(message, file=sys.stderr),
+            probe_access=lambda timeout: foundry_writer.probe_project_access(timeout),
         )
         if config.knowledge_mode is KnowledgeMode.SEARCH_BLOB:
             tr = InstallerMessages(config.ui_language or DEFAULT_UI_LANGUAGE)
@@ -562,6 +629,12 @@ def _add_install_arguments(parser: argparse.ArgumentParser, language: str = "en"
     tr = InstallerMessages(language)
     parser.add_argument("--non-interactive", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--new-foundry-account", action="store_true",
+        help=tr(
+            "Create a new Foundry account name for a clean installation; preserve the saved name generation for normal retries."
+        ),
+    )
     parser.add_argument(
         "--mode",
         choices=[mode.value for mode in KnowledgeMode],
@@ -771,6 +844,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     prompts = None
     draft = None
     stage = "Input and discovery"
+    config = None
+    deployment_values: dict[str, str] = {}
     try:
         if args.command == "install":
             if args.reset_wizard and (args.non_interactive or args.dry_run):
@@ -794,9 +869,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     draft=draft,
                 )
             if args.dry_run:
-                return _plan(config)
+                return _plan(config, new_foundry_account=args.new_foundry_account)
             if prompts is not None:
-                _interactive_plan(config, prompts)
+                _interactive_plan(config, prompts, new_foundry_account=args.new_foundry_account)
                 if not prompts.yes_no(prompts.messages("Proceed with provisioning and deployment"), default=False):
                     prompts.output(prompts.messages("Installation cancelled; Azure state was not changed."))
                     return 1
@@ -813,8 +888,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             with phase("Saving the environment"):
                 runner = AzdRunner(str(Path.cwd()))
                 runner.ensure_environment(config.environment_name)
+                config = _resolve_foundry_name_generation(runner, config, args.new_foundry_account)
                 for command in _commands(config, "provision")[:-1]:
                     runner.run(command)
+                    if args.new_foundry_account and command[3] == "FOUNDRY_NAME_SALT":
+                        print(InstallerMessages(config.ui_language or language)(
+                            "A fresh Foundry name generation is saved for this environment. "
+                            "Reuse it for retries; changing it again creates another account."
+                        ), file=sys.stderr)
             with phase("Provisioning Azure resources"):
                 deployment_values = AzureProvisioner(Path.cwd()).run(config)
             with phase("Saving confirmed deployment outputs"):
@@ -825,14 +906,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if prompts is not None:
                 prompts.output(prompts.messages("Installation completed."))
-            if draft is not None:
-                try:
-                    draft.clear()
-                except WizardDraftError as exc:
-                    print(prompts.messages(
-                        "Deployment succeeded, but the local installer draft could not be removed: {detail}",
-                        detail=exc,
-                    ), file=sys.stderr)
             print(
                 json.dumps(
                     {
@@ -859,6 +932,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "provision":
             config.require_complete_install()
             runner.ensure_environment(config.environment_name)
+            config = _resolve_foundry_name_generation(runner, config)
             for command in _commands(config, "provision")[:-1]:
                 runner.run(command)
             deployment_values = AzureProvisioner(Path.cwd()).run(config)
@@ -882,7 +956,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         return 0
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         tr = prompts.messages if prompts is not None else InstallerMessages(language)
         print(tr(
             "Local installation interrupted. Remote operations may continue; "
@@ -890,6 +964,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         ) if stage != "Input and discovery" or args.command in {"provision", "deploy"} else tr(
             "Input interrupted; installation cancelled."
         ), file=sys.stderr)
+        if args.command == "install":
+            print(format_recovery(config, stage, exc, deployment_values, tr.language), file=sys.stderr)
         return 130
     except WizardCancelled as exc:
         tr = prompts.messages if prompts is not None else InstallerMessages(language)
@@ -917,4 +993,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             else tr("error")
         )
         print(f"{prefix}: {detail if isinstance(exc, DeploymentFailedError) else redact(detail)}", file=sys.stderr)
+        if args.command == "install":
+            print(format_recovery(config, stage, exc, deployment_values, tr.language), file=sys.stderr)
         return 2

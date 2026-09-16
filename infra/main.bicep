@@ -9,6 +9,10 @@ param provisioningOperationId string
 @description('Lowercase environment identifier used to derive resource names.')
 param environmentName string
 
+@maxLength(32)
+@description('Persisted non-secret Foundry naming generation. Empty preserves legacy account names.')
+param foundryNameSalt string = ''
+
 @description('Existing or new resource group name.')
 param resourceGroupName string = 'rg-${environmentName}'
 
@@ -109,7 +113,8 @@ param bingTermsAccepted bool
 param webGroundingSites string
 
 var token = uniqueString(subscription().id, environmentName)
-var foundryName = 'ai-${environmentName}-${token}'
+var foundryToken = empty(foundryNameSalt) ? token : uniqueString(subscription().id, environmentName, foundryNameSalt)
+var foundryName = 'ai-${environmentName}-${foundryToken}'
 var webAppName = 'app-${environmentName}-${token}'
 var storageName = take(replace('st${environmentName}${token}', '-', ''), 24)
 var searchName = 'srch-${environmentName}-${token}'

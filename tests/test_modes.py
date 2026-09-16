@@ -82,10 +82,31 @@ def test_compiled_foundry_serializes_account_child_writes(compiled_foundry_templ
         f"{account_type}/projects",
         f"{account_type}/deployments",
         "Microsoft.Authorization/roleAssignments",
+        "Microsoft.Resources/deployments",
     }
     assert resources[account_type].get("dependsOn", []) == []
     assert resources[f"{account_type}/projects"]["dependsOn"] == [account_id]
     assert set(resources[f"{account_type}/deployments"]["dependsOn"]) == {
         account_id, project_id,
     }
-    assert resources["Microsoft.Authorization/roleAssignments"]["dependsOn"] == [account_id]
+    assignments = [
+        resource for resource in compiled_foundry_template["resources"]
+        if resource["type"] == "Microsoft.Authorization/roleAssignments"
+    ]
+    assert len(assignments) == 1
+    web_assignment = assignments[0]
+    assert web_assignment["dependsOn"] == [account_id]
+    assert web_assignment["properties"]["principalId"] == "[parameters('webPrincipalId')]"
+    project_module = resources["Microsoft.Resources/deployments"]
+    assert project_module["name"] == "project-access"
+    assert project_id in project_module["dependsOn"]
+    assert "identity.principalId" in project_module["properties"]["parameters"]["projectPrincipalId"]["value"]
+    assert project_module["properties"]["parameters"]["roleDefinitionId"]["value"] == "[parameters('cognitiveUserRoleDefinitionId')]"
+    project_assignment, = project_module["properties"]["template"]["resources"]
+    assert project_assignment["type"] == "Microsoft.Authorization/roleAssignments"
+    assert project_assignment["properties"] == {
+        "roleDefinitionId": "[parameters('roleDefinitionId')]",
+        "principalId": "[parameters('projectPrincipalId')]",
+        "principalType": "ServicePrincipal",
+    }
+    assert project_assignment["scope"] == "[format('Microsoft.CognitiveServices/accounts/{0}', parameters('accountName'))]"

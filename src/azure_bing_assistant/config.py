@@ -59,6 +59,14 @@ def validate_model_capacity(value: int) -> int:
     return value
 
 
+def validate_foundry_name_salt(value: object) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"(?:[0-9a-f]{32})?", value):
+        raise ConfigurationError(
+            "FOUNDRY_NAME_SALT must be empty or 32 lowercase hexadecimal characters"
+        )
+    return value
+
+
 def _environment_boolean(source: Mapping[str, str], name: str, default: bool) -> bool:
     value = source.get(name)
     if value is None:
@@ -191,8 +199,10 @@ class InstallerConfig:
     foundry_user_role_definition_id: str | None = None
     storage_blob_data_reader_role_definition_id: str | None = None
     search_index_data_reader_role_definition_id: str | None = None
+    foundry_name_salt: str = ""
 
     def __post_init__(self) -> None:
+        validate_foundry_name_salt(self.foundry_name_salt)
         validate_identifier("environment_name", self.environment_name)
         if not _LOCATION.fullmatch(self.location):
             raise ConfigurationError("location must be a lowercase Azure region identifier")
@@ -338,13 +348,15 @@ class InstallerConfig:
             search_index_data_reader_role_definition_id=source.get(
                 "SEARCH_INDEX_DATA_READER_ROLE_DEFINITION_ID"
             ),
+            foundry_name_salt=source.get("FOUNDRY_NAME_SALT", ""),
         )
 
-    def public_parameters(self) -> dict[str, str]:
+    def public_parameters(self) -> dict[str, str | bool]:
         if self.knowledge_mode is None:
             raise ConfigurationError("knowledge_mode is required")
         return {
             "environmentName": self.environment_name,
+            "foundryNameGenerationConfigured": bool(self.foundry_name_salt),
             "location": self.location,
             "knowledgeMode": self.knowledge_mode.value,
             "subscriptionConfigured": str(bool(self.subscription_id)).lower(),
@@ -413,6 +425,7 @@ class InstallerConfig:
         if self.knowledge_mode is None:
             raise ConfigurationError("knowledge_mode is required")
         values = {
+            "FOUNDRY_NAME_SALT": self.foundry_name_salt,
             "AZURE_LOCATION": self.location,
             "KNOWLEDGE_MODE": self.knowledge_mode.value,
             "CREATE_RESOURCE_GROUP": str(self.create_resource_group).lower(),

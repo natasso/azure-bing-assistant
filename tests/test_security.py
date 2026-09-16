@@ -66,6 +66,9 @@ def test_no_custom_conversation_key_or_storage_infrastructure():
         and path.suffix.lower() in {".py", ".js", ".md", ".bicep", ".toml", ".yml", ".yaml"}
         and ".git" not in path.parts
         and "__pycache__" not in path.parts
+        and ".venv" not in path.parts
+        and "venv" not in path.parts
+        and "node_modules" not in path.parts
     ).lower()
 
     for forbidden in (
