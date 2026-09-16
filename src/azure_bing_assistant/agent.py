@@ -12,6 +12,7 @@ from typing import Any, Protocol
 from urllib.parse import unquote, urlsplit
 
 from .config import validate_websites
+from .localization import load_catalog
 
 
 class AgentVersionWriter(Protocol):
@@ -387,13 +388,7 @@ def transform_citations(
     language: str = "en",
 ) -> list[SafeCitation]:
     """Project untrusted citations to opaque, document-relative references."""
-    if language not in {"it", "en"}:
-        raise ValueError("language must be 'it' or 'en'")
-    labels = {
-        "bing": "Ricerca Bing" if language == "it" else "Bing search",
-        "web": "Fonte web" if language == "it" else "Web source",
-        "document": "Documento" if language == "it" else "Document",
-    }
+    labels = load_catalog(language)["citations"]
     safe: list[SafeCitation] = []
     seen: set[str] = set()
     for citation in raw:

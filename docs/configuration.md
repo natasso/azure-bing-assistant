@@ -1,6 +1,131 @@
-# Configurazione / Configuration
+# Configuration / Configurazione
 
-[Italiano](#italiano) · [English](#english) · [README](../README.md)
+[English guide](#english) · [Languages](#languages) · [Italiano](#italiano) · [README](../README.md)
+
+## International university setup
+
+Azure Bing Assistant is intended for universities internationally whose public
+portals change frequently. Admissions, deadlines, programmes, student services,
+and regulations are maintained by the university on its authoritative websites.
+Domain-filtered Bing web grounding can use indexed public pages without first
+duplicating that portal content in a separate knowledge base. This reduces
+duplicated content maintenance; it does not replace university content owners.
+Examples here use fictitious universities, reserved example domains, and
+placeholders rather than customer deployment details.
+
+**Public-web limits:** Bing indexing and source availability can lag behind
+changes. Neither immediate freshness nor complete crawling/search coverage is
+guaranteed. Authenticated pages are not searchable through this path. Not every
+model answer uses search, and generated answers can be wrong: open citations,
+check dates and content, and use the authoritative university pages for deadlines
+and procedures. Do not submit sensitive information.
+
+Start with the [English installation guide](#english), then review:
+
+1. [Languages and native installer inputs](#languages).
+2. [Required domain and subdomain policy](#domains-one-at-a-time).
+3. [Costs and assumptions](#cost-estimate-en).
+4. [Text and visual customization](#customization-en) and [embedding](#embed-chat-en).
+5. [Security, privacy, and access responsibilities](security.md#english).
+
+**Safe deployment boundaries remain unchanged.** Authorized public domains are
+mandatory; there is no unfiltered web fallback. The wizard requires an explicit
+subdomain decision: the native filter includes subdomains, so a host-only/No
+policy stops installation before terms or Azure writes. Document search and
+Blob Storage are optional and **off by default** (`off`); `searchBlob` adds
+administrator-managed, indexed documents and costs, not chat uploads. Bing
+terms, costs, and data flow outside Azure compliance/geographic boundaries
+require explicit acceptance. Protect the complete UI/API ingress as needed;
+CORS is not access control. Validate model/region/tool support and live domain
+enforcement before exposing a deployment.
+
+<a id="languages"></a>
+
+## Languages, native labels, and RTL
+
+The same nine packaged locales cover the **full installer and frontend**,
+including prompts, help, validation context, summaries, progress, confirmations,
+controls, accessibility copy, and generated citation labels:
+
+| Code | Language | Menu label | Native Yes / No | Direction |
+|---|---|---|---|---|
+| `it` | Italian (default) | Italiano | `sì` / `no` | LTR |
+| `en` | English | English | `yes` / `no` | LTR |
+| `fr` | French | Français / French | `oui` / `non` | LTR |
+| `es` | Spanish | Español / Spanish | `sí` / `no` | LTR |
+| `pt` | European Portuguese | Português / Portuguese | `sim` / `não` | LTR |
+| `el` | Greek | Ελληνικά / Greek | `ναι` / `όχι` | LTR |
+| `he` | Hebrew (Israel) | עברית / Hebrew | `כן` / `לא` | RTL |
+| `ar` | Arabic | العربية / Arabic | `نعم` / `لا` | RTL |
+| `tr` | Turkish | Türkçe / Turkish | `evet` / `hayır` | LTR |
+
+Italian remains the initial default. Existing Italian/English menu entries
+(`it`, `en`) and saved configurations remain compatible; the additional
+languages extend the existing choices. A valid saved wizard language becomes
+the next default. An explicit `--ui-language` selects the installer language
+without a picker. Use **one** code, not the whole list:
+
+```powershell
+# Choose one of: it, en, fr, es, pt, el, he, ar, tr
+python -m azure_bing_assistant install --ui-language fr
+python -m azure_bing_assistant install --help
+```
+
+The first command starts the interactive installer; it still requires domain
+policy, Bing terms, and final approval before Azure changes. For runtime
+configuration, use the same code in `UI_LANGUAGE`, for example `UI_LANGUAGE=he`
+or `UI_LANGUAGE=pt`. See [existing deployment updates](#ui-text-en) before
+changing an App Service. Code changes/catalog additions require deploying the
+updated package; changing a setting on an older package does not add languages.
+
+Yes/no questions accept the native full words above. English `y`/`yes` and
+`n`/`no` remain compatibility inputs. Invalid input repeats only the same
+question; Enter uses the displayed default. **Terms and final approval always
+default to No and require fresh explicit consent**, regardless of language.
+Language selection never weakens domain or subdomain enforcement.
+
+For Hebrew and Arabic, the frontend uses right-to-left (RTL) layout while
+URLs, code, and technical identifiers remain left-to-right and readable.
+On Windows, the Python CLI configures stdin, stdout, and stderr as **UTF-8**,
+including redirected output, to support all native scripts. No user environment
+configuration is needed for the CLI. Older PowerShell pipeline consumers should
+read UTF-8. Use a Unicode-capable terminal and suitable fonts: font coverage and
+bidirectional rendering still vary, and RTL terminal layout is not guaranteed.
+This encoding behavior does not change the Italian default.
+Azure names, SKUs, region identifiers, JSON keys, and provider diagnostics are
+not translated, but installer phase/error context is localized.
+
+The central locale registry and nine JSON catalogs under
+`src/azure_bing_assistant/locales` are the shared source; frontend translations
+are generated from those same catalogs rather than maintained independently.
+Keep placeholders and technical identifiers intact when maintaining catalogs,
+and regenerate `app/frontend/locales.js` after catalog changes. From the
+repository root:
+
+```powershell
+python .\scripts\build_frontend_locales.py
+python .\scripts\build_frontend_locales.py --check
+```
+
+The first command updates the local generated file; `--check` verifies exact
+catalog parity without writing. The browser loads this same-origin bundle,
+not a third-party translation service. Include the generated artifact in the
+deployment package: the server serves it at `/locales.js` and does not regenerate
+it at runtime.
+
+The selected language controls the UI and installer, **not the language of all
+model responses**: the model remains instructed to answer in the user's
+language unless asked otherwise. There is no per-visitor selector or automatic
+browser-language selection. Customer `UI_*` overrides and provider-supplied
+source titles are literal, not automatically translated; generated citation
+labels are localized without changing source URLs.
+
+These are packaged capabilities, not a claim that an existing live university
+deployment has been updated or verified in all nine languages. The
+documentation is English-first with a retained Italian guide; it is not
+translated into all nine languages.
+
+---
 
 <a id="italiano"></a>
 
@@ -100,10 +225,12 @@ Il wizard:
 4. richiede l'accettazione di costi, termini e flusso dati Bing;
 5. mostra un piano e chiede conferma prima delle modifiche.
 
-Alla prima esecuzione il selettore iniziale bilingue propone **Italiano** premendo Invio. La lingua
+Alla prima esecuzione il selettore iniziale con nove etichette native propone **Italiano** premendo Invio. La lingua
 scelta controlla sia il chatbot sia tutte le domande, gli aiuti, i riepiloghi e
-le conferme dell'installer. `--ui-language it|en` salta il selettore e preseleziona
-la lingua anche nel comando interattivo. Nomi Azure, SKU, identificatori regionali,
+le conferme dell'installer. `--ui-language` accetta uno fra `it`, `en`, `fr`,
+`es`, `pt`, `el`, `he`, `ar`, `tr`, salta il selettore e preseleziona la lingua
+anche nel comando interattivo. Le voci `it`/`en` restano compatibili; vedere
+[lingue, risposte native e RTL](#languages). Nomi Azure, SKU, identificatori regionali,
 chiavi JSON e diagnostica tecnica del provider restano invariati; gli errori del
 provider sono accompagnati dal contesto della fase nella lingua scelta.
 Gli altri argomenti `--ui-*` per testi personalizzati vengono elaborati solo con
@@ -125,7 +252,7 @@ quota e compatibilità Azure restano da verificare con il servizio.
 Esempio di correzione immediata (estratto):
 
 ```text
-Nome tecnico del chatbot: Tor Vergata
+Nome tecnico del chatbot: Università Esempio
 Nome tecnico del chatbot deve contenere 3-24 lettere minuscole, cifre o trattini e iniziare con una lettera
 Nome tecnico del chatbot: assistente-demo
 ```
@@ -206,7 +333,8 @@ fetch e non attiva servizi alternativi. È quindi una raccolta esplicita della
 scelta, **non il supporto operativo dell'esclusione dei sottodomini**.
 
 Le risposte italiane accettate sono `s`, `si`, `sì`, `n`, `no` (anche `y`/`yes`
-per compatibilità). Invio usa il valore mostrato, **sempre No per termini e conferma finale**;
+per compatibilità). Le altre otto lingue accettano le rispettive
+[risposte native](#languages). Invio usa il valore mostrato, **sempre No per termini e conferma finale**;
 una risposta sì/no non valida ripropone la stessa domanda. EOF o interruzione
 annullano senza proseguire. Il wizard già aperto va **riavviato manualmente**
 per caricare queste modifiche.
@@ -673,7 +801,7 @@ di risorse.
 | `MODEL_SKU`, `MODEL_CAPACITY` | SKU e capacità | nessuno / `10` |
 | `MODEL_DEPLOYMENT_NAME` | Nome deployment di inferenza | nessuno |
 | `CHATBOT_NAME` | Identificatore chatbot minuscolo | nessuno |
-| `UI_LANGUAGE` | Lingua completa dell'interfaccia: `it` o `en` | `it` |
+| `UI_LANGUAGE` | Lingua completa di UI e installer: `it`, `en`, `fr`, `es`, `pt`, `el`, `he`, `ar`, `tr` | `it` |
 | `WEB_GROUNDING_SITES` | Domini autorizzati separati da virgola (obbligatori, inclusi sottodomini) | nessuno |
 | `BING_TERMS_ACCEPTED` | Accettazione esplicita | `false` |
 | `FOUNDRY_USER_ROLE_DEFINITION_ID` | Input installer: Role ID runtime Foundry completo | nessuno |
@@ -749,9 +877,15 @@ sia disponibile finché il recupero non lo conferma.
 [header e problemi comuni](#embed-trust-it) ·
 [anteprima, deploy e rollback](#verifica-ui-it).
 
-Tutti i testi controllati dall'app sono disponibili in italiano e inglese:
+Tutti i testi controllati dall'app sono disponibili in nove lingue:
+italiano (`it`), inglese (`en`), francese (`fr`), spagnolo (`es`),
+portoghese europeo (`pt`), greco (`el`), ebraico/Israele (`he`), arabo (`ar`),
+turco (`tr`). La localizzazione comprende l'intero installer e il frontend:
 pagina iniziale, modalità, caricamento/errori, dialogo, controlli, accessibilità,
-conversazione, retry e label di fonte generate. Il default è `it`; non esistono
+conversazione, retry e label di fonte/citazione generate. Ebraico e arabo usano
+layout RTL, mantenendo leggibili URL e identificatori tecnici LTR.
+I cataloghi condivisi generano anche le traduzioni frontend; vedere
+[lingue e risposte native](#languages). Il default resta `it`; non esistono
 rilevamento del browser o selettore per visitatore. La lingua della UI non
 traduce risposte AI, URL, label fornite dal provider o override del cliente.
 Le istruzioni chiedono al modello di rispondere nella lingua dell'utente salvo
@@ -781,7 +915,7 @@ usare `textContent` e API DOM, come fa il codice corrente, non `innerHTML`.
 
 | Setting App Service | Flag installazione non interattiva | Effetto | Limite |
 |---|---|---|---:|
-| `UI_LANGUAGE` | `--ui-language it|en` | Tutti i testi UI incorporati | `it`, `en` |
+| `UI_LANGUAGE` | `--ui-language <codice>` | Tutti i testi UI incorporati; installer nella stessa lingua | `it`, `en`, `fr`, `es`, `pt`, `el`, `he`, `ar`, `tr` |
 | `UI_PRODUCT_NAME` | `--ui-product-name` | Titolo browser e nome prodotto | 80 |
 | `UI_ORGANIZATION_NAME` | `--ui-organization-name` | Organizzazione sotto il prodotto | 80 |
 | `UI_ASSISTANT_NAME` | `--ui-assistant-name` | Nome nel launcher e nella chat | 80 |
@@ -817,6 +951,9 @@ az webapp restart `
   --name "REPLACE_WITH_APP_SERVICE_NAME"
 ```
 
+Sostituire `it` con qualsiasi codice supportato: `it`, `en`, `fr`, `es`, `pt`,
+`el`, `he`, `ar`, `tr` (per esempio `UI_LANGUAGE=pt` per portoghese europeo).
+Questo presuppone un pacchetto aggiornato contenente i nove cataloghi.
 Per inglese usare `UI_LANGUAGE=en`. In alternativa,
 `python -m azure_bing_assistant deploy --environment <AMBIENTE> --ui-language en`
 usa e persiste la stessa impostazione, ma esegue anche il normale percorso di
@@ -956,8 +1093,9 @@ Il font predefinito è
 `"Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif`:
 non richiede CDN o font esterni. Lo script iniziale accetta esclusivamente
 `?scoutTheme=light` o `?scoutTheme=dark`; senza parametro usa
-`prefers-color-scheme`. `UI_LANGUAGE=it|en` è configurazione server e non
-esiste un parametro URL per cambiare lingua.
+`prefers-color-scheme`. `UI_LANGUAGE` è configurazione server e accetta `it`,
+`en`, `fr`, `es`, `pt`, `el`, `he`, `ar`, `tr`; non esiste un parametro URL
+per cambiare lingua. Verificare anche font, testi misti e layout RTL per `he`/`ar`.
 
 <a id="bubble-ui-it"></a>
 
@@ -1318,7 +1456,8 @@ Checklist di rilascio:
 1. rivedere `git diff -- README.md docs/configuration.md app/frontend`;
 2. registrare le proprie personalizzazioni in un commit identificabile;
 3. provare desktop e mobile, chiaro e scuro, tastiera/focus, Esc, annullamento,
-   citazioni e testi italiano/inglese;
+   citazioni e testi in tutte le nove lingue, inclusi layout RTL `he`/`ar`,
+   URL/codice LTR e risposte sì/no native dell'installer;
 4. distribuire prima in un'istanza di test e fare un hard reload per escludere
    la cache del browser;
 5. per rollback, applicare `git revert <COMMIT_PROPRIO>` e ridistribuire il
@@ -1428,10 +1567,12 @@ The wizard:
 4. requires acknowledgement of Bing costs, terms, and data flow;
 5. shows a plan and asks before making changes.
 
-On the first run, the initial bilingual picker defaults to **Italiano** on Enter. The selected
+On the first run, the nine-language picker uses native labels and defaults to **Italiano** on Enter. The selected
 language controls both the chatbot and all installer questions, guidance,
-summaries and confirmations. `--ui-language it|en` skips the picker and preselects
-the language in interactive mode. Azure names, SKUs, region identifiers, JSON
+summaries and confirmations. `--ui-language` accepts one of `it`, `en`, `fr`,
+`es`, `pt`, `el`, `he`, `ar`, `tr`, skips the picker and preselects the language
+in interactive mode. Existing `it`/`en` menu entries remain compatible; see
+[languages, native inputs, and RTL](#languages). Azure names, SKUs, region identifiers, JSON
 keys and technical provider diagnostics remain unchanged; provider failures
 include localized stage context.
 Other `--ui-*` custom-copy arguments are processed only with
@@ -1529,7 +1670,8 @@ to Yes, claims a response filter prevents remote fetches, or enables alternative
 services. This implements explicit choice collection, **not operational
 subdomain exclusion**.
 
-English answers accept `y`, `yes`, `n`, `no`. Enter accepts the displayed default,
+English answers accept `y`, `yes`, `n`, `no`; the other eight languages accept
+their [native yes/no inputs](#languages) too. Enter accepts the displayed default,
 **always No for terms and final approval**; an invalid yes/no answer repeats the same question. EOF or
 interruption cancels without continuing. **Manually restart** an already open
 wizard to load these changes.
@@ -1987,7 +2129,7 @@ changing it can generate a separate set of resources.
 | `MODEL_SKU`, `MODEL_CAPACITY` | SKU and capacity | none / `10` |
 | `MODEL_DEPLOYMENT_NAME` | Inference deployment name | none |
 | `CHATBOT_NAME` | Lowercase chatbot identifier | none |
-| `UI_LANGUAGE` | Complete interface language: `it` or `en` | `it` |
+| `UI_LANGUAGE` | Complete UI/installer language: `it`, `en`, `fr`, `es`, `pt`, `el`, `he`, `ar`, `tr` | `it` |
 | `WEB_GROUNDING_SITES` | Required comma-separated authorized domains (includes subdomains) | none |
 | `BING_TERMS_ACCEPTED` | Explicit acknowledgement | `false` |
 | `FOUNDRY_USER_ROLE_DEFINITION_ID` | Installer input: full Foundry runtime role ID | none |
@@ -2062,9 +2204,15 @@ document availability until retrieval confirms it.
 [headers and troubleshooting](#embed-trust-en) ·
 [preview, deploy, and rollback](#ui-validation-en).
 
-All application-controlled copy is available in Italian and English: landing
+All application-controlled copy is available in nine languages: Italian (`it`),
+English (`en`), French (`fr`), Spanish (`es`), European Portuguese (`pt`),
+Greek (`el`), Hebrew/Israel (`he`), Arabic (`ar`), and Turkish (`tr`).
+This covers the full installer and frontend: landing
 page, modes, loading/errors, dialog, controls, accessibility text, conversation,
-retry, and generated source labels. The default is `it`; there is no browser
+retry, and generated source/citation labels. Hebrew and Arabic use RTL layout
+with readable LTR URLs and technical identifiers. The shared catalogs also
+generate frontend translations; see [languages and native inputs](#languages).
+The default remains `it`; there is no browser
 detection or per-visitor selector. UI language does not translate AI answers,
 URLs, provider labels, or customer overrides.
 The agent instructions ask the model to answer in the user's language unless
@@ -2094,7 +2242,7 @@ the current code does; do not introduce `innerHTML`.
 
 | App Service setting | Non-interactive install flag | Effect | Limit |
 |---|---|---|---:|
-| `UI_LANGUAGE` | `--ui-language it|en` | All built-in UI copy | `it`, `en` |
+| `UI_LANGUAGE` | `--ui-language <code>` | All built-in UI copy; installer in the same language | `it`, `en`, `fr`, `es`, `pt`, `el`, `he`, `ar`, `tr` |
 | `UI_PRODUCT_NAME` | `--ui-product-name` | Browser title and product name | 80 |
 | `UI_ORGANIZATION_NAME` | `--ui-organization-name` | Organization below product | 80 |
 | `UI_ASSISTANT_NAME` | `--ui-assistant-name` | Launcher and chat name | 80 |
@@ -2129,6 +2277,9 @@ az webapp restart `
   --name "REPLACE_WITH_APP_SERVICE_NAME"
 ```
 
+Replace `en` with any supported code: `it`, `en`, `fr`, `es`, `pt`, `el`, `he`,
+`ar`, `tr` (for example, `UI_LANGUAGE=pt` for European Portuguese).
+This assumes an updated deployed package containing all nine catalogs.
 Use `UI_LANGUAGE=it` to return to Italian. Alternatively,
 `python -m azure_bing_assistant deploy --environment <ENVIRONMENT> --ui-language en`
 uses and persists the same setting, but also performs the normal Foundry
@@ -2266,8 +2417,9 @@ The default font stack is
 `"Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif`;
 it needs no CDN or external font. The startup script accepts only
 `?scoutTheme=light` or `?scoutTheme=dark`; with no parameter it follows
-`prefers-color-scheme`. `UI_LANGUAGE=it|en` is server configuration; there is
-no URL language parameter.
+`prefers-color-scheme`. `UI_LANGUAGE` is server configuration and accepts `it`,
+`en`, `fr`, `es`, `pt`, `el`, `he`, `ar`, `tr`; there is no URL language
+parameter. Also check fonts, mixed-direction text, and RTL layout for `he`/`ar`.
 
 <a id="ui-bubbles-en"></a>
 
@@ -2622,7 +2774,8 @@ Release checklist:
 1. review `git diff -- README.md docs/configuration.md app/frontend`;
 2. record your customizations in an identifiable commit;
 3. test desktop and mobile, light and dark, keyboard/focus, Escape, cancel,
-   citations, and Italian/English copy;
+   citations, and copy in all nine languages, including `he`/`ar` RTL layout,
+   LTR URLs/code, and native installer yes/no inputs;
 4. deploy to a test instance first and hard-reload to rule out browser cache;
 5. to roll back, run `git revert <YOUR_COMMIT>` and redeploy the package; do not
    use `git reset --hard` on shared work.

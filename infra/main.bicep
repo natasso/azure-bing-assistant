@@ -59,6 +59,13 @@ param chatbotName string
 @allowed([
   'it'
   'en'
+  'fr'
+  'es'
+  'pt'
+  'el'
+  'he'
+  'ar'
+  'tr'
 ])
 @description('Language for all application-controlled interface strings.')
 param uiLanguage string = 'it'

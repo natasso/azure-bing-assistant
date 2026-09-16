@@ -243,6 +243,10 @@ def create_app(
     async def javascript() -> FileResponse:
         return FileResponse(frontend / "app.js", media_type="text/javascript")
 
+    @application.get("/locales.js")
+    async def locales() -> FileResponse:
+        return FileResponse(frontend / "locales.js", media_type="text/javascript")
+
     @application.get("/styles.css")
     async def styles() -> FileResponse:
         return FileResponse(frontend / "styles.css", media_type="text/css")

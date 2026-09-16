@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="it">
+<html lang="it" dir="ltr">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -21,7 +21,7 @@
   <main id="portal-root" class="portal-root">
     <section class="portal-card" aria-labelledby="portal-title">
       <div class="portal-brand">
-        <span class="brand-mark" aria-hidden="true">AI</span>
+        <span class="brand-mark" dir="ltr" aria-hidden="true">AI</span>
         <div>
           <p id="portal-product" class="portal-product">Azure Bing Assistant</p>
           <p id="portal-organization" class="portal-organization" hidden></p>
@@ -87,7 +87,7 @@
     <section class="chat-container">
       <header class="chat-titlebar">
         <div class="chat-titlebar-left">
-          <span class="chat-avatar" aria-hidden="true">AI</span>
+          <span class="chat-avatar" dir="ltr" aria-hidden="true">AI</span>
           <div class="chat-heading">
             <h1 id="dialog-title" class="chat-title">Assistente</h1>
             <p id="knowledge-mode-hint" class="chat-subtitle">Caricamento configurazione</p>
@@ -156,6 +156,7 @@
           <textarea
             id="message"
             class="composer-input"
+            dir="auto"
             rows="1"
             maxlength="8000"
             required
@@ -164,7 +165,7 @@
             aria-describedby="composer-hint char-counter"
           ></textarea>
           <span id="char-counter" class="char-counter">
-            <span id="char-count">0</span> / 8000
+            <bdi dir="ltr"><span id="char-count">0</span> / 8000</bdi>
           </span>
           <button id="send-btn" type="submit" class="composer-send" aria-label="Invia messaggio">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -179,6 +180,7 @@
     </section>
   </dialog>
 
+  <script src="/locales.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
 </html>

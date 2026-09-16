@@ -12,6 +12,7 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 from .installer_messages import InstallerMessageError
+from .localization import DEFAULT_UI_LANGUAGE, SUPPORTED_UI_LANGUAGES
 
 
 class ConfigurationError(InstallerMessageError, ValueError):
@@ -21,10 +22,6 @@ class ConfigurationError(InstallerMessageError, ValueError):
 class KnowledgeMode(str, Enum):
     OFF = "off"
     SEARCH_BLOB = "searchBlob"
-
-
-SUPPORTED_UI_LANGUAGES = ("it", "en")
-DEFAULT_UI_LANGUAGE = "it"
 
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{2,23}$")
@@ -86,7 +83,10 @@ def _validate_ui_text(name: str, value: str, maximum: int) -> str:
 
 def validate_ui_language(value: str) -> str:
     if value not in SUPPORTED_UI_LANGUAGES:
-        raise ConfigurationError("UI_LANGUAGE must be 'it' or 'en'")
+        raise ConfigurationError(
+            "UI_LANGUAGE must be one of: {languages}",
+            languages=", ".join(SUPPORTED_UI_LANGUAGES),
+        )
     return value
 
 

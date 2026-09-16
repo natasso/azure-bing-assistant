@@ -13,6 +13,7 @@ from azure_bing_assistant.agent import (
     AgentResponse,
     InvalidPreviousResponse,
 )
+from azure_bing_assistant.localization import SUPPORTED_UI_LANGUAGES, frontend_strings
 
 
 class FakeAgent:
@@ -287,6 +288,7 @@ def test_config_ui_static_assets_accessibility_and_no_upload():
         response, parser = parse_frontend(client)
         css = client.get("/styles.css")
         js = client.get("/app.js")
+        locales = client.get("/locales.js")
         upload_responses = [
             client.post(path, files={"file": ("document.txt", b"content")})
             for path in ("/upload", "/api/upload", "/api/uploads", "/api/files")
@@ -297,13 +299,20 @@ def test_config_ui_static_assets_accessibility_and_no_upload():
     assert config["suggestedQuestions"] == ["Q1", "Q2"]
     assert config["knowledgeMode"] == "off"
     assert response.headers["content-type"] == "text/html; charset=utf-8"
-    assert parser.find("html", lang="it")
+    assert parser.find("html", lang="it", dir="ltr")
     assert parser.find("dialog", id="chat-dialog", **{"aria-labelledby": "dialog-title"})
     assert parser.find("div", role="log", **{"aria-live": "polite"})
-    assert parser.find("textarea", id="message", maxlength="8000")
+    assert parser.find("textarea", id="message", maxlength="8000", dir="auto")
     assert not parser.find("input", type="file")
     assert css.headers["content-type"] == "text/css; charset=utf-8"
     assert js.headers["content-type"] == "text/javascript; charset=utf-8"
+    assert locales.status_code == 200
+    assert locales.headers["content-type"] == "text/javascript; charset=utf-8"
+    assert "root.CHATBOT_I18N = factory();" in locales.text
+    assert '"installer":' not in locales.text
+    assert [attrs["src"] for attrs in parser.find("script") if "src" in attrs] == [
+        "/locales.js", "/app.js"
+    ]
     assert all(item.status_code == 404 for item in upload_responses)
 
 
@@ -365,10 +374,11 @@ def test_api_uses_complete_localized_defaults_and_source_labels(
     assert response["citations"][0]["label"] == citation
 
 
-def test_language_switch_preserves_literal_overrides_and_explicit_empty_suggestions():
+@pytest.mark.parametrize("language", SUPPORTED_UI_LANGUAGES)
+def test_language_switch_preserves_literal_overrides_and_explicit_empty_suggestions(language):
     environment = {
         "APP_ENV": "test",
-        "UI_LANGUAGE": "en",
+        "UI_LANGUAGE": language,
         "UI_ASSISTANT_NAME": "Assistente personalizzato",
         "UI_WELCOME_TITLE": "Titolo letterale",
         "UI_SUGGESTED_QUESTIONS": "[]",
@@ -376,10 +386,60 @@ def test_language_switch_preserves_literal_overrides_and_explicit_empty_suggesti
 
     config = AppSettings.from_environment(environment).ui_config
 
-    assert config.language == "en"
+    assert config.language == language
     assert config.assistant_name == "Assistente personalizzato"
     assert config.welcome_title == "Titolo letterale"
     assert config.suggested_questions == []
+
+
+@pytest.mark.parametrize("language", SUPPORTED_UI_LANGUAGES)
+def test_api_all_languages_use_frontend_catalog_defaults_without_contract_changes(language):
+    settings = AppSettings.from_environment({
+        "APP_ENV": "test",
+        "UI_LANGUAGE": language,
+        "WEB_GROUNDING_SITES": "example.org",
+    })
+    with TestClient(create_app(settings, FakeAgent())) as client:
+        response = client.get("/api/config")
+    strings = frontend_strings(language)
+    assert response.status_code == 200
+    assert response.json() == {
+        "language": language,
+        "productName": strings["productName"],
+        "organizationName": strings["organizationName"],
+        "assistantName": strings["assistantName"],
+        "welcomeTitle": strings["welcomeTitle"],
+        "welcomeSubtitle": strings["welcomeSubtitle"],
+        "disclaimer": strings["disclaimer"],
+        "suggestedQuestions": strings["suggestions"],
+        "knowledgeMode": "off",
+        "allowedDomains": ["example.org"],
+        "websiteEnforcement": "allowed_domains",
+        "includesSubdomains": True,
+    }
+
+
+@pytest.mark.parametrize("language", ["de", "EN", "en-US", "", "__proto__"])
+def test_invalid_ui_language_cannot_become_a_successful_italian_configuration(language):
+    with pytest.raises(ValueError, match="UI_LANGUAGE"):
+        AppSettings.from_environment({"APP_ENV": "test", "UI_LANGUAGE": language})
+
+
+@pytest.mark.parametrize("language", SUPPORTED_UI_LANGUAGES)
+def test_language_selection_keeps_existing_ui_text_limits(language):
+    with pytest.raises(ValueError, match="assistant_name"):
+        UIConfig(language=language, assistant_name="x" * 81)
+    with pytest.raises(ValueError, match="welcome_title"):
+        UIConfig(language=language, welcome_title="x" * 121)
+    with pytest.raises(ValueError, match="welcome_subtitle"):
+        UIConfig(language=language, welcome_subtitle="x" * 241)
+    with pytest.raises(ValueError, match="disclaimer"):
+        UIConfig(language=language, disclaimer="x" * 321)
+    with pytest.raises(ValueError, match="suggested_questions"):
+        UIConfig(language=language, suggested_questions=["x" * 161])
+    first = UIConfig(language=language)
+    first.suggested_questions.clear()
+    assert len(UIConfig(language=language).suggested_questions) == 5
 
 
 def test_html_resources_are_local_and_has_no_inline_handlers():

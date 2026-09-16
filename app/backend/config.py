@@ -11,48 +11,29 @@ from urllib.parse import urlsplit
 
 from azure_bing_assistant.config import validate_websites
 from azure_bing_assistant.agent import SearchDocumentSource
+from azure_bing_assistant.localization import (
+    DEFAULT_UI_LANGUAGE,
+    SUPPORTED_UI_LANGUAGES,
+    frontend_strings,
+)
 
 
-DEFAULT_UI_LANGUAGE = "it"
+_UI_DEFAULT_KEYS = {
+    "product_name": "productName",
+    "organization_name": "organizationName",
+    "assistant_name": "assistantName",
+    "welcome_title": "welcomeTitle",
+    "welcome_subtitle": "welcomeSubtitle",
+    "disclaimer": "disclaimer",
+    "suggested_questions": "suggestions",
+}
 LOCALIZED_UI_DEFAULTS = {
-    "it": {
-        "product_name": "Azure Bing Assistant",
-        "organization_name": "Organizzazione",
-        "assistant_name": "Assistente",
-        "welcome_title": "Come posso aiutarti?",
-        "welcome_subtitle": (
-            "Fai una domanda sulle informazioni disponibili nei siti autorizzati."
-        ),
-        "disclaimer": (
-            "Questo assistente usa l'AI. Verifica le informazioni importanti "
-            "e non condividere dati sensibili."
-        ),
-        "suggested_questions": (
-            "Che cosa puoi aiutarmi a trovare?",
-            "Riassumi un argomento attuale",
-            "Spiega un concetto in modo semplice",
-            "Confronta due opzioni",
-            "Dove posso trovare maggiori informazioni?",
-        ),
-    },
-    "en": {
-        "product_name": "Azure Bing Assistant",
-        "organization_name": "Organization",
-        "assistant_name": "Assistant",
-        "welcome_title": "How can I help?",
-        "welcome_subtitle": "Ask a question about information from authorized websites.",
-        "disclaimer": (
-            "This assistant uses AI. Verify important information and do not "
-            "share sensitive data."
-        ),
-        "suggested_questions": (
-            "What can you help me find?",
-            "Summarize a current topic",
-            "Explain a concept in simple terms",
-            "Compare two options",
-            "Where can I learn more?",
-        ),
-    },
+    language: {
+        name: tuple(strings[key]) if name == "suggested_questions" else strings[key]
+        for name, key in _UI_DEFAULT_KEYS.items()
+    }
+    for language in SUPPORTED_UI_LANGUAGES
+    for strings in (frontend_strings(language),)
 }
 
 
@@ -91,8 +72,8 @@ class UIConfig:
     suggested_questions: list[str] | None = None
 
     def __post_init__(self) -> None:
-        if self.language not in LOCALIZED_UI_DEFAULTS:
-            raise ValueError("UI_LANGUAGE must be 'it' or 'en'")
+        if self.language not in SUPPORTED_UI_LANGUAGES:
+            raise ValueError(f"UI_LANGUAGE must be one of: {', '.join(SUPPORTED_UI_LANGUAGES)}")
         defaults = LOCALIZED_UI_DEFAULTS[self.language]
         limits = {
             "product_name": 80,

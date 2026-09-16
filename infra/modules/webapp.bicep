@@ -21,6 +21,13 @@ param webGroundingSites string
 @allowed([
   'it'
   'en'
+  'fr'
+  'es'
+  'pt'
+  'el'
+  'he'
+  'ar'
+  'tr'
 ])
 param uiLanguage string
 param uiProductName string

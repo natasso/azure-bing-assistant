@@ -1668,7 +1668,7 @@ def test_standalone_language_precedence_preserves_persisted_english():
     assert overridden.app_settings["UI_LANGUAGE"] == "it"
 
 
-@pytest.mark.parametrize("stored", ["fr", "", 42])
+@pytest.mark.parametrize("stored", ["xx", "", 42])
 def test_invalid_persisted_language_fails_before_deploy_side_effects(
     monkeypatch, stored
 ):

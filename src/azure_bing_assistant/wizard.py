@@ -22,6 +22,9 @@ from .config import (
     validate_websites,
 )
 from .installer_messages import InstallerMessageError, InstallerMessages
+from .localization import (
+    DEFAULT_UI_LANGUAGE, LANGUAGE_LABELS, NO_WORDS, SUPPORTED_UI_LANGUAGES, YES_WORDS,
+)
 from .wizard_draft import WizardDraft
 
 
@@ -431,22 +434,20 @@ class ConsolePrompts:
     def yes_no(self, question: str, default: bool = False) -> bool:
         if type(default) is not bool:
             raise ConfigurationError("Yes/no default must be a boolean")
-        suffix = (
-            ("[S/n]" if default else "[s/N]") if self.messages.language == "it"
-            else ("[Y/n]" if default else "[y/N]")
-        )
-        affirmative = {"y", "yes"}
-        if self.messages.language == "it":
-            affirmative |= {"s", "si", "sì"}
+        affirmative = YES_WORDS[self.messages.language]
+        negative = NO_WORDS[self.messages.language]
+        yes, no = affirmative[0], negative[0]
+        suffix = f"[{yes.upper()}/{no}]" if default else f"[{yes}/{no.upper()}]"
         self.output(self.messages(
-            "Yes: y/yes; No: n/no; Enter = Yes." if default
-            else "Yes: y/yes; No: n/no; Enter = No."
+            "Yes: {yes}; No: {no}; Enter = {default}.",
+            yes="/".join(affirmative), no="/".join(negative),
+            default=self.messages("Yes" if default else "No"),
         ))
         while True:
-            value = self.read(f"{question} {suffix}: ").lower()
+            value = self.read(f"{question} {suffix}: ").casefold()
             if not value:
                 return default
-            if value in {"n", "no"}:
+            if value in negative:
                 return False
             if value in affirmative:
                 return True
@@ -572,7 +573,9 @@ def run_wizard(
     ui_language: str | None = None,
     draft: WizardDraft | None = None,
 ) -> InstallerConfig:
-    prior_language = draft.get("language", "it") if draft is not None else "it"
+    prior_language = (
+        draft.get("language", DEFAULT_UI_LANGUAGE) if draft is not None else DEFAULT_UI_LANGUAGE
+    )
     if draft is not None and draft.has_answers:
         prompts.messages = InstallerMessages(ui_language or prior_language)
         prompts.output(prompts.messages(
@@ -582,15 +585,14 @@ def run_wizard(
     language = (
         validate_ui_language(ui_language)
         if ui_language is not None
-        else ("it", "en")[
+        else SUPPORTED_UI_LANGUAGES[
             prompts.select(
                 "Lingua del chatbot e dell'installer / Chatbot and installer language",
-                (
-                    ("Italiano (predefinito / default)", "English")
-                    if prior_language == "it"
-                    else ("Italiano", "English (predefinito / default)")
+                tuple(
+                    label + (" (predefinito / default)" if code == prior_language else "")
+                    for code, label in zip(SUPPORTED_UI_LANGUAGES, LANGUAGE_LABELS)
                 ),
-                default_index=("it", "en").index(prior_language),
+                default_index=SUPPORTED_UI_LANGUAGES.index(prior_language),
                 bilingual=True,
             )
         ]
@@ -726,19 +728,11 @@ def _run_wizard(
             ))
             remember(remove=("capacity",))
     _capacity_guidance(model, default_capacity, prompts)
-    if language == "it":
-        capacity_question = "Capacità del modello"
-        minimum_label, maximum_label = "minimo", "massimo"
-        prompts.output(
-            "Premi Invio per mantenere questo valore, oppure inserisci un altro valore "
-            "(numero intero positivo)."
-        )
-    else:
-        capacity_question = "Model capacity"
-        minimum_label, maximum_label = "minimum", "maximum"
-        prompts.output(
-            "Press Enter to keep this value, or enter another value (positive integer)."
-        )
+    capacity_question = tr("Model capacity")
+    minimum_label, maximum_label = tr("minimum"), tr("maximum")
+    prompts.output(tr(
+        "Press Enter to keep this value, or enter another value (positive integer)."
+    ))
     capacity_bounds = []
     if model.minimum_capacity is not None:
         capacity_bounds.append(f"{minimum_label} {model.minimum_capacity}")
@@ -764,39 +758,21 @@ def _run_wizard(
         validator=lambda value: validate_identifier(tr("Chatbot technical name"), value),
     )
     remember(chatbot_name=chatbot_name)
-    if language == "it":
-        environment_question = "Nome breve dell’installazione (es. assistente-demo)"
-        prompts.output(
-            "È un nome interno per salvare la configurazione dell’installer e ricavare "
-            "i nomi delle risorse Azure."
-        )
-        prompts.output(
-            "Può essere diverso dal nome del gruppo di risorse già scelto; "
-            "non è il titolo della chat visibile ai visitatori."
-        )
-        prompts.output(
-            "Usa 3–24 caratteri: lettere minuscole, cifre o trattini, iniziando con una lettera."
-        )
-        prompts.output(
-            "Riusa questo nome per gli aggiornamenti: cambiarlo può generare "
-            "un insieme separato di risorse."
-        )
-    else:
-        environment_question = "Short installation name (e.g. assistant-demo)"
-        prompts.output(
-            "This is an internal name used to save the installer configuration and derive "
-            "Azure resource names."
-        )
-        prompts.output(
-            "It can differ from the resource-group name already chosen; "
-            "it is not the chat title visitors see."
-        )
-        prompts.output(
-            "Use 3–24 lowercase letters, digits or hyphens, starting with a letter."
-        )
-        prompts.output(
-            "Reuse this name for updates: changing it can generate a separate set of resources."
-        )
+    environment_question = tr("Short installation name (e.g. assistant-demo)")
+    prompts.output(tr(
+        "This is an internal name used to save the installer configuration and derive "
+        "Azure resource names."
+    ))
+    prompts.output(tr(
+        "It can differ from the resource-group name already chosen; "
+        "it is not the chat title visitors see."
+    ))
+    prompts.output(tr(
+        "Use 3–24 lowercase letters, digits or hyphens, starting with a letter."
+    ))
+    prompts.output(tr(
+        "Reuse this name for updates: changing it can generate a separate set of resources."
+    ))
     environment_name = prompts.text(
         environment_question,
         default=saved("environment_name"),

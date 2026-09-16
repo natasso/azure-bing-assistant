@@ -1,164 +1,20 @@
 "use strict";
 
 const MAX_MESSAGE_LENGTH = 8000;
-const DEFAULT_LANGUAGE = "it";
-const UI_STRINGS = Object.freeze({
-  it: Object.freeze({
-    metaDescription: "Assistente web basato su Microsoft Foundry e Grounding with Bing Search.",
-    productName: "Azure Bing Assistant",
-    organizationName: "Organizzazione",
-    assistantName: "Assistente",
-    welcomeTitle: "Come posso aiutarti?",
-    welcomeSubtitle: "Fai una domanda sulle informazioni disponibili nei siti autorizzati.",
-    disclaimer: "Questo assistente usa l'AI. Verifica le informazioni importanti e non condividere dati sensibili.",
-    suggestions: Object.freeze([
-      "Che cosa puoi aiutarmi a trovare?",
-      "Riassumi un argomento attuale",
-      "Spiega un concetto in modo semplice",
-      "Confronta due opzioni",
-      "Dove posso trovare maggiori informazioni?",
-    ]),
-    startConversation: "Inizia una conversazione",
-    openAssistant: "Apri {assistant}",
-    openAssistantTitle: "Apri assistente",
-    askAssistant: "Chiedi a {assistant}",
-    closeAssistant: "Chiudi assistente",
-    closeTitle: "Chiudi (Esc)",
-    newChat: "Nuova chat",
-    conversationHistory: "Cronologia della conversazione",
-    messageLabel: "Messaggio",
-    sendMessage: "Invia messaggio",
-    composerHint: "Invio per inviare · Maiusc+Invio per andare a capo",
-    availableInChat: "Disponibile in questa chat",
-    publicWebAndDocuments: "Siti autorizzati e ricerca nei documenti configurati",
-    publicWebWithSources: "Ricerca nei siti autorizzati",
-    bingConfigured: "Filtro domini configurato (inclusi i sottodomini). Uso e fonti sono verificati per ogni risposta. Domini: ",
-    configurationStatus: "Stato della configurazione",
-    offLabel: "Siti autorizzati (predefinita)",
-    offSummary: "Chiedi informazioni disponibili nei siti autorizzati.",
-    offDetail: "I documenti privati non sono disponibili in questa chat.",
-    offDocuments: "Servono documenti gestiti? Un amministratore può aggiungere facoltativamente Azure AI Search.",
-    offPlaceholder: "Fai una domanda sui siti autorizzati…",
-    searchLabel: "Siti autorizzati + documenti (Azure AI Search, facoltativo)",
-    searchSummary: "Chiedi informazioni sui siti autorizzati e sui documenti gestiti disponibili.",
-    searchDetail: "Azure AI Search è configurato. La disponibilità dei documenti dipende dall'indicizzazione amministrativa.",
-    searchDocuments: "I documenti sono aggiunti e gestiti da un amministratore; questa chat non carica file.",
-    searchPlaceholder: "Fai una domanda sui siti autorizzati o sui documenti disponibili…",
-    configUnavailableLabel: "Configurazione non disponibile",
-    configUnavailableSummary: "Non è stato possibile confermare le funzionalità della chat.",
-    configUnavailableTitle: "Disponibilità della chat non verificabile",
-    configUnavailableDescription: "Non è stato possibile caricare la configurazione. Non si presume la disponibilità del web o dei documenti.",
-    configUnavailableDocuments: "La disponibilità del web e dei documenti non può essere confermata.",
-    configUnavailableWelcome: "Non è stato possibile caricare la configurazione dell'assistente.",
-    configUnavailableMode: "Le funzionalità della chat non possono essere confermate in questo momento.",
-    configUnavailableNotice: "Non è stato possibile caricare la configurazione. La disponibilità del web e dei documenti non può essere confermata.",
-    configLoadingLabel: "Caricamento configurazione",
-    configLoadingSummary: "Verifica delle funzionalità disponibili della chat.",
-    configLoadingTitle: "Verifica della disponibilità della chat",
-    configLoadingDescription: "Caricamento della configurazione dell'assistente.",
-    configLoadingDocuments: "La disponibilità del web e dei documenti verrà mostrata dopo il caricamento.",
-    configLoadingWelcome: "Caricamento della configurazione dell'assistente.",
-    configLoadingMode: "La disponibilità del web e dei documenti non è ancora stata confermata.",
-    configLoadingNotice: "Caricamento della configurazione dell'assistente.",
-    genericPlaceholder: "Scrivi un messaggio…",
-    userAvatar: "Tu",
-    userMessage: "Il tuo messaggio",
-    assistantMessage: "Messaggio dell'assistente",
-    sources: "Fonti:",
-    reference: "Riferimento",
-    assistantTyping: "L'assistente sta scrivendo",
-    preparingAnswer: "Preparazione della risposta",
-    cancel: "Annulla",
-    cancelled: "Richiesta annullata. La conversazione è stata conservata.",
-    retry: "Riprova",
-    retryNew: "Riprova come nuova conversazione",
-    startNew: "Inizia una nuova conversazione",
-    previousUnavailable: "Questa conversazione non può più continuare. Ricomincia o riprova questo messaggio come nuova conversazione.",
-    requestFailed: "L'assistente non ha completato la richiesta. Riprova.",
-    sourcePolicyUnverified: "Impossibile verificare le fonti autorizzate. Chiedi all’amministratore di verificare configurazione e supporto del modello, poi inizia una nuova chat.",
-    messageTooLong: "I messaggi non possono superare {maximum} caratteri.",
-    dialogOpenError: "Impossibile aprire la finestra dell'assistente.",
-  }),
-  en: Object.freeze({
-    metaDescription: "Web assistant powered by Microsoft Foundry and Grounding with Bing Search.",
-    productName: "Azure Bing Assistant",
-    organizationName: "Organization",
-    assistantName: "Assistant",
-    welcomeTitle: "How can I help?",
-    welcomeSubtitle: "Ask a question about information from authorized websites.",
-    disclaimer: "This assistant uses AI. Verify important information and do not share sensitive data.",
-    suggestions: Object.freeze([
-      "What can you help me find?",
-      "Summarize a current topic",
-      "Explain a concept in simple terms",
-      "Compare two options",
-      "Where can I learn more?",
-    ]),
-    startConversation: "Start a conversation",
-    openAssistant: "Open {assistant}",
-    openAssistantTitle: "Open assistant",
-    askAssistant: "Ask {assistant}",
-    closeAssistant: "Close assistant",
-    closeTitle: "Close (Esc)",
-    newChat: "New chat",
-    conversationHistory: "Conversation history",
-    messageLabel: "Message",
-    sendMessage: "Send message",
-    composerHint: "Enter to send · Shift+Enter for a new line",
-    availableInChat: "Available in this chat",
-    publicWebAndDocuments: "Authorized websites and configured document search",
-    publicWebWithSources: "Authorized website search",
-    bingConfigured: "Domain filter configured (including subdomains). Tool use and sources are checked for each response. Domains: ",
-    configurationStatus: "Configuration status",
-    offLabel: "Authorized websites (default)",
-    offSummary: "Ask about information from authorized websites.",
-    offDetail: "Private documents are not available in this chat.",
-    offDocuments: "Need governed documents? An administrator can optionally add Azure AI Search.",
-    offPlaceholder: "Ask about authorized websites…",
-    searchLabel: "Authorized websites + documents (Azure AI Search, optional)",
-    searchSummary: "Ask about authorized websites and available administrator-managed documents.",
-    searchDetail: "Azure AI Search is configured. Document availability depends on administrator indexing.",
-    searchDocuments: "Documents are added and managed by an administrator; this chat does not upload files.",
-    searchPlaceholder: "Ask about authorized websites or available documents…",
-    configUnavailableLabel: "Configuration unavailable",
-    configUnavailableSummary: "Chat capabilities could not be confirmed.",
-    configUnavailableTitle: "Chat availability unavailable",
-    configUnavailableDescription: "Assistant configuration could not be loaded. No web or document availability is being assumed.",
-    configUnavailableDocuments: "Web and document availability cannot be confirmed.",
-    configUnavailableWelcome: "Assistant configuration could not be loaded.",
-    configUnavailableMode: "Chat capabilities cannot be confirmed right now.",
-    configUnavailableNotice: "Assistant configuration could not be loaded. Web and document availability cannot be confirmed.",
-    configLoadingLabel: "Configuration loading",
-    configLoadingSummary: "Checking available chat capabilities.",
-    configLoadingTitle: "Checking chat availability",
-    configLoadingDescription: "Loading assistant configuration.",
-    configLoadingDocuments: "Web and document availability will appear after configuration loads.",
-    configLoadingWelcome: "Loading assistant configuration.",
-    configLoadingMode: "Web and document availability has not been confirmed yet.",
-    configLoadingNotice: "Loading assistant configuration.",
-    genericPlaceholder: "Type a message…",
-    userAvatar: "You",
-    userMessage: "Your message",
-    assistantMessage: "Assistant message",
-    sources: "Sources:",
-    reference: "Reference",
-    assistantTyping: "Assistant is typing",
-    preparingAnswer: "Preparing an answer",
-    cancel: "Cancel",
-    cancelled: "Request cancelled. Your conversation was preserved.",
-    retry: "Retry",
-    retryNew: "Retry as new conversation",
-    startNew: "Start new conversation",
-    previousUnavailable: "This conversation can no longer be continued. Start over or retry this message as a new conversation.",
-    requestFailed: "The assistant could not complete the request. Please try again.",
-    sourcePolicyUnverified: "Authorized sources could not be verified. Ask the administrator to check configuration and model support, then start a new chat.",
-    messageTooLong: "Messages cannot exceed {maximum} characters.",
-    dialogOpenError: "Unable to open the assistant dialog.",
-  }),
-});
+const I18N = typeof module !== "undefined" && module.exports
+  ? require("./locales.js")
+  : globalThis.CHATBOT_I18N;
+const DEFAULT_LANGUAGE = I18N.defaultLanguage;
+const SUPPORTED_LANGUAGES = I18N.supportedLanguages;
+const RTL_LANGUAGES = I18N.rtlLanguages;
+const UI_STRINGS = I18N.strings;
+
+function isSupportedLanguage(value) {
+  return typeof value === "string" && SUPPORTED_LANGUAGES.includes(value);
+}
 
 function normalizeLanguage(value) {
-  return value === "en" ? "en" : DEFAULT_LANGUAGE;
+  return isSupportedLanguage(value) ? value : DEFAULT_LANGUAGE;
 }
 
 function stringsFor(language) {
@@ -176,6 +32,7 @@ function applyStaticLanguage(elements, documentElement, language) {
   const selected = normalizeLanguage(language);
   const strings = stringsFor(selected);
   documentElement.lang = selected;
+  documentElement.dir = RTL_LANGUAGES.includes(selected) ? "rtl" : "ltr";
   elements.metaDescription.setAttribute("content", strings.metaDescription);
   elements.primaryOpenLabel.textContent = strings.startConversation;
   elements.launcher.title = strings.openAssistantTitle;
@@ -253,7 +110,7 @@ function isValidConfigPayload(value) {
     value !== null
     && typeof value === "object"
     && !Array.isArray(value)
-    && (value.language === "it" || value.language === "en")
+    && isSupportedLanguage(value.language)
     && textFields.every(
       (field) => typeof value[field] === "string" && value[field].trim(),
     )
@@ -438,14 +295,89 @@ function isPreviousResponseFailure(status, data) {
   return status === 409 && data?.code === "invalid_previous_response";
 }
 
+function setDomainDescription(element, description, domains) {
+  element.textContent = description;
+  for (const [index, domain] of domains.entries()) {
+    if (index) element.append(", ");
+    const identifier = element.ownerDocument.createElement("bdi");
+    identifier.dir = "ltr";
+    identifier.textContent = domain;
+    element.append(identifier);
+  }
+}
+
+function appendPlainTextBlocks(container, text) {
+  const value = typeof text === "string" ? text.replace(/\r\n?/g, "\n") : "";
+  const blocks = value.split(/\n{2,}/);
+  for (const block of blocks) {
+    const paragraph = container.ownerDocument.createElement("p");
+    paragraph.className = "message-text";
+    paragraph.dir = "auto";
+    paragraph.textContent = block;
+    container.append(paragraph);
+  }
+}
+
+function appendCitations(container, citations, language = DEFAULT_LANGUAGE) {
+  if (!Array.isArray(citations) || !citations.length) return;
+  const document = container.ownerDocument;
+  const strings = stringsFor(language);
+  const list = document.createElement("ul");
+  list.className = "citations";
+  const listLabel = document.createElement("li");
+  listLabel.className = "citations-label";
+  listLabel.textContent = strings.sources;
+  list.append(listLabel);
+  let citationCount = 0;
+  for (const citation of citations) {
+    if (!citation || typeof citation !== "object") continue;
+    const item = document.createElement("li");
+    const citationLabel = normalizedText(citation.label, strings.reference);
+    const reference = typeof citation.reference === "string"
+      ? citation.reference
+      : "";
+    if (!reference) continue;
+    const title = document.createElement("span");
+    title.className = "citation-title";
+    title.dir = "auto";
+    title.textContent = citationLabel;
+    const referenceText = document.createElement("bdi");
+    referenceText.className = "citation-reference";
+    referenceText.dir = "ltr";
+    referenceText.textContent = reference;
+    if (isSafeCitationReference(reference)) {
+      const link = document.createElement("a");
+      link.className = "citation-link message-citation-link";
+      link.href = reference;
+      link.rel = "noopener noreferrer";
+      link.target = "_blank";
+      link.append(title, referenceText);
+      item.append(link);
+    } else {
+      const citationText = document.createElement("span");
+      citationText.className = "citation-text message-citation-text";
+      citationText.append(title, referenceText);
+      item.append(citationText);
+    }
+    list.append(item);
+    citationCount += 1;
+  }
+  if (citationCount) container.append(list);
+}
+
 const testApi = {
   DEFAULT_LANGUAGE,
   MAX_MESSAGE_LENGTH,
+  SUPPORTED_LANGUAGES,
+  RTL_LANGUAGES,
   UI_STRINGS,
+  appendCitations,
+  appendPlainTextBlocks,
   applyStaticLanguage,
   formatString,
   getFocusWrapTarget,
   isSafeCitationReference,
+  isSupportedLanguage,
   isolateBackgroundElements,
   isValidConfigPayload,
   isPreviousResponseFailure,
@@ -458,6 +390,7 @@ const testApi = {
   isValidPreviousResponseId,
   restoreBackgroundElements,
   restoreFocus,
+  setDomainDescription,
   shouldSubmitComposerEvent,
   validateMessage,
 };
@@ -712,7 +645,11 @@ if (typeof document !== "undefined") {
     elements.capabilityTitle.textContent = state.knowledgeMode === "searchBlob"
       ? strings.publicWebAndDocuments
       : strings.publicWebWithSources;
-    elements.capabilityDescription.textContent = strings.bingConfigured + state.config.allowedDomains.join(", ");
+    setDomainDescription(
+      elements.capabilityDescription,
+      strings.bingConfigured,
+      state.config.allowedDomains,
+    );
     elements.documentCapability.textContent = mode.documents;
     elements.launcherLabel.textContent = formatString(strings.askAssistant, {
       assistant: state.config.assistantName,
@@ -736,6 +673,7 @@ if (typeof document !== "undefined") {
       const button = document.createElement("button");
       button.className = "suggestion-chip";
       button.type = "button";
+      button.dir = "auto";
       button.textContent = question;
       button.addEventListener("click", () => insertSuggestedQuestion(question));
       item.append(button);
@@ -791,17 +729,6 @@ if (typeof document !== "undefined") {
     elements.clearBtn.hidden = false;
   }
 
-  function appendPlainTextBlocks(container, text) {
-    const value = typeof text === "string" ? text.replace(/\r\n?/g, "\n") : "";
-    const blocks = value.split(/\n{2,}/);
-    for (const block of blocks) {
-      const paragraph = document.createElement("p");
-      paragraph.className = "message-text";
-      paragraph.textContent = block;
-      container.append(paragraph);
-    }
-  }
-
   function addMessage(role, text, citations = []) {
     const strings = currentStrings();
     const article = document.createElement("article");
@@ -812,53 +739,13 @@ if (typeof document !== "undefined") {
     );
     const avatar = document.createElement("span");
     avatar.className = "msg-avatar";
+    avatar.dir = role === "assistant" ? "ltr" : "auto";
     avatar.setAttribute("aria-hidden", "true");
     avatar.textContent = role === "assistant" ? "AI" : strings.userAvatar;
     const content = document.createElement("div");
     content.className = "bubble";
     appendPlainTextBlocks(content, text);
-
-    if (Array.isArray(citations) && citations.length) {
-      const list = document.createElement("ul");
-      list.className = "citations";
-      const listLabel = document.createElement("li");
-      listLabel.className = "citations-label";
-      listLabel.textContent = strings.sources;
-      list.append(listLabel);
-      let citationCount = 0;
-      for (const citation of citations) {
-        if (!citation || typeof citation !== "object") continue;
-        const item = document.createElement("li");
-        const citationLabel = normalizedText(citation.label, strings.reference);
-        const reference = typeof citation.reference === "string"
-          ? citation.reference
-          : "";
-        if (!reference) continue;
-        const title = document.createElement("span");
-        title.className = "citation-title";
-        title.textContent = citationLabel;
-        const referenceText = document.createElement("span");
-        referenceText.className = "citation-reference";
-        referenceText.textContent = reference;
-        if (isSafeCitationReference(reference)) {
-          const link = document.createElement("a");
-          link.className = "citation-link message-citation-link";
-          link.href = reference;
-          link.rel = "noopener noreferrer";
-          link.target = "_blank";
-          link.append(title, referenceText);
-          item.append(link);
-        } else {
-          const citationText = document.createElement("span");
-          citationText.className = "citation-text message-citation-text";
-          citationText.append(title, referenceText);
-          item.append(citationText);
-        }
-        list.append(item);
-        citationCount += 1;
-      }
-      if (citationCount) content.append(list);
-    }
+    appendCitations(content, citations, state.language);
 
     article.append(avatar, content);
     elements.conversation.append(article);
@@ -877,6 +764,7 @@ if (typeof document !== "undefined") {
     article.setAttribute("aria-label", strings.assistantTyping);
     const avatar = document.createElement("span");
     avatar.className = "msg-avatar";
+    avatar.dir = "ltr";
     avatar.setAttribute("aria-hidden", "true");
     avatar.textContent = "AI";
     const bubble = document.createElement("div");

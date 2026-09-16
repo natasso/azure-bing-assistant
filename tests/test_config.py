@@ -146,7 +146,7 @@ def test_runtime_ui_environment_is_bounded_and_deterministic():
         ("UI_SUGGESTED_QUESTIONS", "not-json"),
         ("UI_SUGGESTED_QUESTIONS", '["1","2","3","4","5","6"]'),
         ("UI_SUGGESTED_QUESTIONS", '["", "ok"]'),
-        ("UI_LANGUAGE", "fr"),
+        ("UI_LANGUAGE", "xx"),
         ("AGENT_TIMEOUT_SECONDS", "301"),
     ],
 )

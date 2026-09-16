@@ -344,7 +344,7 @@ def test_maximum_100_domains_resume_without_101st_prompt(tmp_path):
     *({"version": 1, "answers": {key: value}} for key, value in [
         ("accept_bing_terms", True), ("bing_terms_accepted", True), ("final_approval", True),
         ("token", "secret"), ("foundry_project_endpoint", "https://example.org"),
-        ("language", "fr"), ("language", 1), ("chatbot_name", "bad name"),
+        ("language", "xx"), ("language", 1), ("chatbot_name", "bad name"),
         ("use_search", "false"), ("use_search", 1), ("capacity", True),
         ("capacity", 5), ("model", {}), ("domain_more", True),
         ("domains", [{"domain": "example.org", "include_subdomains": "false"}]),
@@ -691,7 +691,7 @@ def test_corrupt_cli_draft_localized_recovery_and_explicit_reset(tmp_path, monke
     (["install", "--help"], 0),
     (["--help"], 0),
     (["install", "--unknown"], 2),
-    (["install", "--ui-language", "fr"], 2),
+    (["install", "--ui-language", "xx"], 2),
     (["install", "--dry-run"], None),
     (["install", "--non-interactive"], None),
     (["install", "--non-interactive", "--dry-run"], None),

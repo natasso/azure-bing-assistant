@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
@@ -29,6 +30,7 @@ from .config import (
 from .ingestion import document_upload_guidance
 from .installer_messages import InstallerMessageError, InstallerMessages
 from .install_progress import InstallProgress
+from .localization import SUPPORTED_UI_LANGUAGES
 from .provision import AzureProvisioner, DeploymentFailedError, ProvisioningError, provision_argv
 from .search_blob import AzureRestClient, SearchBlobOrchestrator, SearchBlobSettings
 from .wizard import (
@@ -271,7 +273,10 @@ def _effective_ui_language(
         return DEFAULT_UI_LANGUAGE
     stored = persisted["UI_LANGUAGE"]
     if not isinstance(stored, str):
-        raise ConfigurationError("UI_LANGUAGE must be 'it' or 'en'")
+        raise ConfigurationError(
+            "UI_LANGUAGE must be one of: {languages}",
+            languages=", ".join(SUPPORTED_UI_LANGUAGES),
+        )
     return validate_ui_language(stored)
 
 
@@ -583,7 +588,7 @@ def _add_install_arguments(parser: argparse.ArgumentParser, language: str = "en"
     parser.add_argument("--chatbot-name")
     parser.add_argument(
         "--ui-language",
-        choices=("it", "en"),
+        choices=SUPPORTED_UI_LANGUAGES,
         help=tr("chatbot and installer language (default: it)"),
     )
     parser.add_argument("--ui-product-name")
@@ -709,7 +714,7 @@ def build_parser(language: str = "en") -> argparse.ArgumentParser:
         description=tr("Install and manage Azure Bing Assistant."),
         formatter_class=LocalizedFormatter,
     )
-    subcommands = parser.add_subparsers(dest="command", required=True)
+    subcommands = parser.add_subparsers(dest="command", required=True, prog=parser.prog)
     subcommands.add_parser("doctor", help=tr("check local tools and Azure authentication"))
     install = subcommands.add_parser(
         "install", help=tr("run the guided customer installation"),
@@ -733,7 +738,7 @@ def build_parser(language: str = "en") -> argparse.ArgumentParser:
         )
         child.add_argument("--environment")
         child.add_argument("--location")
-        child.add_argument("--ui-language", choices=("it", "en"))
+        child.add_argument("--ui-language", choices=SUPPORTED_UI_LANGUAGES)
         child.add_argument("--websites", help="authorized domains or root HTTPS URLs (always includes subdomains)")
         child.add_argument("--strict-websites", action="store_true",
                            help="compatibility alias; domain restriction is always required")
@@ -742,7 +747,16 @@ def build_parser(language: str = "en") -> argparse.ArgumentParser:
     return parser
 
 
+def _configure_cli_encoding() -> None:
+    if os.name == "nt":
+        # Redirected Windows streams can otherwise use an encoding without the menu's scripts.
+        for stream in (sys.stdin, sys.stdout, sys.stderr):
+            if isinstance(stream, io.TextIOWrapper):
+                stream.reconfigure(encoding="utf-8", errors=stream.errors)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    _configure_cli_encoding()
     arguments = list(sys.argv[1:] if argv is None else argv)
     language = DEFAULT_UI_LANGUAGE if arguments[:1] == ["install"] else "en"
     for index, argument in enumerate(arguments):
@@ -750,7 +764,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             language = arguments[index + 1]
         elif argument.startswith("--ui-language="):
             language = argument.partition("=")[2]
-    args = build_parser(language).parse_args(arguments)
+    parser_language = language if language in SUPPORTED_UI_LANGUAGES else DEFAULT_UI_LANGUAGE
+    args = build_parser(parser_language).parse_args(arguments)
     if args.command == "doctor":
         return _doctor()
     prompts = None
