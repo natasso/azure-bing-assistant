@@ -109,4 +109,8 @@ def test_compiled_foundry_serializes_account_child_writes(compiled_foundry_templ
         "principalId": "[parameters('projectPrincipalId')]",
         "principalType": "ServicePrincipal",
     }
-    assert project_assignment["scope"] == "[format('Microsoft.CognitiveServices/accounts/{0}', parameters('accountName'))]"
+    # Bicep versions emit either a relative scope or the equivalent full resource ID.
+    assert project_assignment["scope"] in {
+        "[format('Microsoft.CognitiveServices/accounts/{0}', parameters('accountName'))]",
+        account_id,
+    }
