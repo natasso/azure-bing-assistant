@@ -4,6 +4,10 @@ targetScope = 'subscription'
 #disable-next-line no-unused-params
 param provisioningOperationId string
 
+@description('Fingerprint of the requested template and configuration for safe installer resume.')
+#disable-next-line no-unused-params
+param provisioningConfigHash string
+
 @minLength(3)
 @maxLength(24)
 @description('Lowercase environment identifier used to derive resource names.')
@@ -28,6 +32,13 @@ param location string
 ])
 @description('Optional knowledge integration.')
 param knowledgeMode string = 'off'
+
+@allowed([
+  'filteredWebSearch'
+  'bingCustomSearch'
+])
+@description('Bing grounding provider. Legacy templates remain filtered web search unless explicitly selected.')
+param webSearchProvider string = 'filteredWebSearch'
 
 @description('Full role definition resource ID for the current Foundry runtime user role.')
 param cognitiveUserRoleDefinitionId string
@@ -118,6 +129,11 @@ var foundryName = 'ai-${environmentName}-${foundryToken}'
 var webAppName = 'app-${environmentName}-${token}'
 var storageName = take(replace('st${environmentName}${token}', '-', ''), 24)
 var searchName = 'srch-${environmentName}-${token}'
+var bingName = 'bing-${environmentName}-${token}'
+var bingConfigurationName = 'official-sites'
+var bingConnectionName = 'bing-custom-search'
+// Construct the nonsecret ID without depending on the connection: Foundry needs the web identity first.
+var bingConnectionId = resourceId(subscription().subscriptionId, resourceGroupName, 'Microsoft.CognitiveServices/accounts/projects/connections', foundryName, 'project', bingConnectionName)
 
 resource resourceGroupResource 'Microsoft.Resources/resourceGroups@2024-03-01' = if (createResourceGroup) {
   name: resourceGroupName
@@ -148,6 +164,9 @@ module webapp 'modules/webapp.bicep' = {
     uiSuggestedQuestions: uiSuggestedQuestions
     modelDeploymentName: modelDeploymentName
     webGroundingSites: webGroundingSites
+    webSearchProvider: webSearchProvider
+    bingCustomSearchConnectionId: webSearchProvider == 'bingCustomSearch' ? bingConnectionId : ''
+    bingCustomSearchInstanceName: webSearchProvider == 'bingCustomSearch' ? bingConfigurationName : ''
   }
   dependsOn: [
     resourceGroupResource
@@ -168,6 +187,31 @@ module foundry 'modules/foundry.bicep' = {
     modelSku: modelSku
     modelCapacity: modelCapacity
     modelDeploymentName: modelDeploymentName
+  }
+}
+
+module bing 'modules/bing.bicep' = if (webSearchProvider == 'bingCustomSearch') {
+  name: 'bing-custom-search'
+  scope: resourceGroup(resourceGroupName)
+  params: {
+    accountName: bingName
+    configurationName: bingConfigurationName
+    allowedDomains: split(webGroundingSites, ',')
+    environmentName: environmentName
+  }
+  dependsOn: [
+    resourceGroupResource
+  ]
+}
+
+module bingConnection 'modules/bing-connection.bicep' = if (webSearchProvider == 'bingCustomSearch') {
+  name: 'bing-custom-search-connection'
+  scope: resourceGroup(resourceGroupName)
+  params: {
+    accountName: foundry.outputs.accountName
+    projectName: foundry.outputs.projectName
+    connectionName: bingConnectionName
+    bingAccountName: bing!.outputs.accountName
   }
 }
 
@@ -204,6 +248,10 @@ output storageContainerName string = knowledgeMode == 'searchBlob' ? searchBlob!
 output AZURE_RESOURCE_GROUP string = resourceGroupName
 output SERVICE_WEB_NAME string = webapp.outputs.appName
 output FOUNDRY_PROJECT_ENDPOINT string = 'https://${foundry.outputs.accountName}.services.ai.azure.com/api/projects/${foundry.outputs.projectName}'
+output WEB_SEARCH_PROVIDER string = webSearchProvider
+output BING_CUSTOM_SEARCH_RESOURCE_ID string = webSearchProvider == 'bingCustomSearch' ? bing!.outputs.resourceId : ''
+output BING_CUSTOM_SEARCH_CONNECTION_ID string = webSearchProvider == 'bingCustomSearch' ? bingConnection!.outputs.connectionId : ''
+output BING_CUSTOM_SEARCH_INSTANCE_NAME string = webSearchProvider == 'bingCustomSearch' ? bing!.outputs.configurationName : ''
 output SEARCH_ENDPOINT string = knowledgeMode == 'searchBlob' ? 'https://${searchBlob!.outputs.searchName}.search.windows.net' : ''
 output SEARCH_INDEX_NAME string = knowledgeMode == 'searchBlob' ? 'documents' : ''
 output SEARCH_INDEXER_NAME string = knowledgeMode == 'searchBlob' ? 'documents-indexer' : ''

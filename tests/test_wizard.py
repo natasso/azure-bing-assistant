@@ -5,10 +5,15 @@ from unittest.mock import Mock
 
 import pytest
 
+from azure_bing_assistant.installer_messages import InstallerMessages
+from azure_bing_assistant.localization import SUPPORTED_UI_LANGUAGES
+from azure_bing_assistant.model_quota import QuotaUnavailable
+from azure_bing_assistant.wizard_draft import WizardDraft
 from azure_bing_assistant.config import (
     ConfigurationError,
     InstallerConfig,
     KnowledgeMode,
+    WebSearchProvider,
     validate_websites,
 )
 from azure_bing_assistant.wizard import (
@@ -353,6 +358,7 @@ def test_installation_name_help_precedes_required_question_and_preserves_config(
     assert len(questions) == 13
     assert config == InstallerConfig(
         environment_name="my-install-2",
+        web_search_provider=WebSearchProvider.BING_CUSTOM_SEARCH,
         location="westeurope",
         knowledge_mode=KnowledgeMode.OFF,
         subscription_id="sub-selected",
@@ -1187,6 +1193,8 @@ def test_discovery_parses_nested_live_model_skus(monkeypatch):
 @pytest.mark.parametrize(
     "payload",
     [
+        None,
+        123,
         [],
         [{"kind": "AIServices", "model": {"name": "gpt-5.4", "version": "1", "format": "OpenAI"}}],
         [{"kind": "AIServices", "model": {"name": "gpt-5.4", "version": "1", "format": "OpenAI", "skus": {}}}],
@@ -1205,3 +1213,106 @@ def test_discovery_rejects_empty_or_malformed_model_skus(monkeypatch, payload):
 
     with pytest.raises(DiscoveryError, match="no deployable model/SKU"):
         AzureCliDiscovery().models("sanitized-subscription", "italynorth")
+
+
+def quota_discovery(*, limit=150, current=140, usage_name="provider-exact-pool"):
+    discovery = FakeDiscovery()
+    discovery.models = Mock(return_value=[
+        ModelChoice(
+            "live-model", "2026-01-01", "OpenAI", "GlobalStandard",
+            1, 1000000, 1000, usage_name,
+        ),
+    ])
+    azure = AzureCliDiscovery()
+    azure._json = Mock(return_value={"value": [{
+        "name": {"value": "provider-exact-pool"},
+        "limit": limit, "currentValue": current, "unit": "Count",
+    }]})
+    discovery.quota = Mock(wraps=azure.quota)
+    return discovery, azure._json
+
+
+QUOTA_ANSWERS = [
+    "1", "2", "1", "1", "", "helper", "chatbot-dev", "chat-model",
+    "no", "docs.example.org", "yes", "no", "yes",
+]
+
+
+@pytest.mark.parametrize("language", SUPPORTED_UI_LANGUAGES)
+def test_live_quota_is_localized_before_capacity_without_inventing_conversion(language):
+    discovery, query = quota_discovery()
+    transcript = []
+    answers = iter(QUOTA_ANSWERS)
+
+    def answer(question):
+        transcript.append(question)
+        return next(answers)
+
+    config = run_wizard(discovery, ConsolePrompts(answer, transcript.append), language)
+    tr = InstallerMessages(language)
+    snapshot = tr(
+        "Quota pool: {usage_name}; limit: {limit}; current usage: {current}; remaining: "
+        "{remaining}; Azure unit: {unit}.",
+        usage_name="provider-exact-pool", limit="150", current="140", remaining="10", unit="Count",
+    )
+    assert snapshot in transcript
+    position = next(i for i, line in enumerate(transcript) if "[1000]:" in line)
+    assert transcript.index(snapshot) < position
+    assert config.model_capacity == 1000
+    assert tr(
+        "The API unit is shown verbatim; no conversion to deployment capacity, TPM or RPM "
+        "is inferred. SKU defaults and workload examples are not available quota. "
+        "No capacity is changed automatically; saved valid capacity is preserved."
+    ) in transcript
+    query.assert_called_once()
+    discovery.quota.assert_called_once_with(
+        "sub-selected", "westeurope", discovery.models.return_value[0],
+    )
+
+
+@pytest.mark.parametrize("current", [0, 150, 200])
+def test_saved_valid_capacity_survives_live_quota_zero_or_smaller_than_saved(tmp_path, current):
+    discovery, query = quota_discovery()
+    draft = WizardDraft(tmp_path)
+    draft.load()
+    answers = QUOTA_ANSWERS.copy()
+    answers[4] = "750"
+    config = run_wizard(discovery, prompts_for(answers)[0], "en", draft)
+    assert config.model_capacity == 750
+    discovery, query = quota_discovery(current=current)
+    restored = WizardDraft(tmp_path)
+    restored.load()
+    prompts, output = prompts_for([""] * 12 + ["yes"])
+    config = run_wizard(discovery, prompts, "en", restored)
+    assert config.model_capacity == 750 and restored.get("capacity") == 750
+    assert any("saved deployment's total capacity" in line for line in output)
+    assert any(f"remaining: {max(0, 150 - current)}; Azure unit: Count" in line for line in output)
+    assert not any("outside the current model/SKU bounds" in line for line in output)
+    query.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", [
+    DiscoveryError("private raw error must not be exposed"),
+    QuotaUnavailable(),
+    None,
+])
+def test_unreadable_quota_is_explicit_and_does_not_block_or_change_capacity(failure):
+    discovery, query = quota_discovery()
+    discovery.quota = Mock(side_effect=failure) if failure else Mock(return_value=None)
+    prompts, output = prompts_for(QUOTA_ANSWERS)
+    config = run_wizard(discovery, prompts, "en")
+    assert config.model_capacity == 1000
+    assert any("Quota unavailable:" in line for line in output)
+    assert not any("remaining:" in line for line in output)
+    assert not any("private raw error" in line for line in output)
+    query.assert_not_called()
+
+
+def test_no_usage_name_explicitly_reports_quota_unavailable_without_a_request():
+    discovery, query = quota_discovery(usage_name=None)
+    prompts, output = prompts_for(QUOTA_ANSWERS)
+    assert run_wizard(discovery, prompts, "en").model_capacity == 1000
+    assert any("Quota unavailable: Azure did not provide an unambiguous SKU usageName" in line for line in output)
+    assert not any("remaining:" in line for line in output)
+    query.assert_not_called()
+    discovery.quota.assert_not_called()

@@ -24,6 +24,20 @@ class KnowledgeMode(str, Enum):
     SEARCH_BLOB = "searchBlob"
 
 
+class WebSearchProvider(str, Enum):
+    FILTERED_WEB_SEARCH = "filteredWebSearch"
+    BING_CUSTOM_SEARCH = "bingCustomSearch"
+
+
+def parse_web_search_provider(value: str) -> WebSearchProvider:
+    try:
+        return WebSearchProvider(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            "WEB_SEARCH_PROVIDER must be 'filteredWebSearch' or 'bingCustomSearch'"
+        ) from exc
+
+
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{2,23}$")
 _LOCATION = re.compile(r"^[a-z][a-z0-9]{2,31}$")
 _AZURE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -200,6 +214,7 @@ class InstallerConfig:
     storage_blob_data_reader_role_definition_id: str | None = None
     search_index_data_reader_role_definition_id: str | None = None
     foundry_name_salt: str = ""
+    web_search_provider: WebSearchProvider | None = None
 
     def __post_init__(self) -> None:
         validate_foundry_name_salt(self.foundry_name_salt)
@@ -210,6 +225,12 @@ class InstallerConfig:
             self.knowledge_mode, KnowledgeMode
         ):
             raise ConfigurationError("knowledge_mode must be 'off' or 'searchBlob'")
+        if self.web_search_provider is not None and not isinstance(
+            self.web_search_provider, WebSearchProvider,
+        ):
+            raise ConfigurationError(
+                "WEB_SEARCH_PROVIDER must be 'filteredWebSearch' or 'bingCustomSearch'"
+            )
         if self.subscription_id is not None and (
             not self.subscription_id.strip()
             or any(c.isspace() for c in self.subscription_id)
@@ -290,8 +311,13 @@ class InstallerConfig:
         location: str | None = None,
         environ: Mapping[str, str] | None = None,
         ui_language: str | None = None,
+        web_search_provider: str | None = None,
     ) -> "InstallerConfig":
         source = os.environ if environ is None else environ
+        configured_provider = (
+            web_search_provider if web_search_provider is not None
+            else source.get("WEB_SEARCH_PROVIDER")
+        )
         configured_mode = mode if mode is not None else source.get("KNOWLEDGE_MODE")
         try:
             knowledge_mode = (
@@ -349,6 +375,10 @@ class InstallerConfig:
                 "SEARCH_INDEX_DATA_READER_ROLE_DEFINITION_ID"
             ),
             foundry_name_salt=source.get("FOUNDRY_NAME_SALT", ""),
+            web_search_provider=(
+                parse_web_search_provider(configured_provider)
+                if configured_provider is not None else None
+            ),
         )
 
     def public_parameters(self) -> dict[str, str | bool]:
@@ -385,6 +415,9 @@ class InstallerConfig:
                 else "<localized default>"
             ),
             "webGrounding": "web_search",
+            "webSearchProvider": (
+                self.web_search_provider or WebSearchProvider.FILTERED_WEB_SEARCH
+            ).value,
             "websites": ",".join(self.websites) if self.websites else "<configure>",
             "websiteEnforcement": "allowed_domains",
         }
@@ -426,6 +459,9 @@ class InstallerConfig:
             raise ConfigurationError("knowledge_mode is required")
         values = {
             "FOUNDRY_NAME_SALT": self.foundry_name_salt,
+            "WEB_SEARCH_PROVIDER": (
+                self.web_search_provider or WebSearchProvider.FILTERED_WEB_SEARCH
+            ).value,
             "AZURE_LOCATION": self.location,
             "KNOWLEDGE_MODE": self.knowledge_mode.value,
             "CREATE_RESOURCE_GROUP": str(self.create_resource_group).lower(),

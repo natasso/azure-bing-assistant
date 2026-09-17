@@ -19,6 +19,13 @@ param chatbotName string
 param modelDeploymentName string
 param webGroundingSites string
 @allowed([
+  'filteredWebSearch'
+  'bingCustomSearch'
+])
+param webSearchProvider string = 'filteredWebSearch'
+param bingCustomSearchConnectionId string = ''
+param bingCustomSearchInstanceName string = ''
+@allowed([
   'it'
   'en'
   'fr'
@@ -151,6 +158,18 @@ resource site 'Microsoft.Web/sites@2024-04-01' = {
         {
           name: 'WEB_GROUNDING_SITES'
           value: webGroundingSites
+        }
+        {
+          name: 'WEB_SEARCH_PROVIDER'
+          value: webSearchProvider
+        }
+        {
+          name: 'BING_CUSTOM_SEARCH_CONNECTION_ID'
+          value: bingCustomSearchConnectionId
+        }
+        {
+          name: 'BING_CUSTOM_SEARCH_INSTANCE_NAME'
+          value: bingCustomSearchInstanceName
         }
       ], uiSettings, [
         {

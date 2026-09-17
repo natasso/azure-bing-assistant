@@ -10,7 +10,9 @@
 
 - Chat FastAPI con frontend locale HTML/CSS/JavaScript, limiti di input,
   cancellazione, errori limitati e rotte upload rifiutate.
-- `web_search.filters.allowed_domains` obbligatorio in entrambe le modalità, senza risorsa Bing standalone.
+- Grounding with Bing Custom Search predefinito, con risorsa/configurazione e
+  connessione Foundry; `filteredWebSearch` esplicito per compatibilità.
+- `web_search.filters.allowed_domains` obbligatorio in entrambe le modalità.
 - `off` come sola disattivazione della ricerca documentale.
 - `searchBlob` opzionale con Storage, Azure AI Search, indice/indicizzatore e
   strumento Search aggiuntivo; Bing resta disponibile.
@@ -56,7 +58,8 @@ riconfermati al momento del deployment. Nessuna voce autorizza a dichiarare
 
 Il filtro dominio nativo è implementato con classi SDK reali e verificato offline,
 con versione agente verificata/fissata e rifiuto di evidenza fuori dominio o
-metadati mancanti. Non richiede Search o Custom Search. L'accettazione e
+metadati mancanti. Search documentale resta opzionale e indipendente dal provider
+web. L'accettazione e
 l'enforcement live per modello/regione, incluso `open_page`, restano da provare
 manualmente: i test locali non attestano fetch del servizio. Il flag
 `--strict-websites` è un alias; il filtro è sempre obbligatorio. Consultare
@@ -77,7 +80,9 @@ esplicitare costi, proprietà operativa, privacy e test.
 
 - FastAPI chat with local HTML/CSS/JavaScript, input limits, cancellation,
   bounded errors, and rejected upload routes.
-- Required `web_search.filters.allowed_domains` in both modes, without a standalone Bing resource.
+- Default Grounding with Bing Custom Search, with its resource/configuration
+  and Foundry connection; explicit `filteredWebSearch` for compatibility.
+- Required `web_search.filters.allowed_domains` in both modes.
 - `off` as document-search off only.
 - Optional `searchBlob` with Storage, Azure AI Search, index/indexer, and an
   additional Search tool; Bing remains available.
@@ -122,7 +127,8 @@ time. Nothing in this list supports a “production ready” claim.
 
 Native domain filtering is implemented and checked offline using real SDK classes,
 agent-version verification/pinning, and rejection of outside evidence or missing
-metadata. No Search or Custom Search setup is required. Live model/region acceptance
+metadata. Document Search remains optional and independent of the web provider.
+Live model/region acceptance
 and enforcement, including `open_page`, remain manual verification work: local
 tests cannot attest service fetches. `--strict-websites` is an alias; restriction
 is always required. See [migration and verification](configuration.md#migration-and-manual-filter-verification).

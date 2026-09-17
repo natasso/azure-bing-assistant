@@ -90,6 +90,7 @@ def test_install_progress_tracks_real_boundaries_and_keeps_stdout_json(
     result = cli.main([
         "install", "--non-interactive", "--ui-language", language, "--mode", "off",
         "--environment", "demo", "--subscription", "example-sub", "--resource-group", "rg-demo",
+        "--web-search-provider", "filteredWebSearch",
         "--location", "westeurope", "--model-name", "example-model", "--model-version", "1",
         "--model-format", "OpenAI", "--model-sku", "DataZoneStandard", "--model-capacity", "1000",
         "--deployment-name", "chat-model", "--chatbot-name", "helper", "--websites", "example.org",
@@ -210,13 +211,16 @@ def test_interactive_plan_and_final_default_no_keep_selected_language(
     assert flow.run(["example.org", "yes", "no"], language, ["yes", "maybe", ""], explicit) == 1
     text = "\n".join(flow.transcript)
     assert "example.org" in text
+    assert "bingCustomSearch" in text
     if language == "it":
         assert "Piano di installazione (nessuna modifica effettuata):" in text
+        assert "Provider di ricerca web: bingCustomSearch" in text
         assert "Procedere con la creazione delle risorse e la distribuzione [s/N]:" in text
         assert "Installazione annullata; lo stato di Azure non è stato modificato." in text
         assert "Installation plan" not in text and "Proceed with" not in text
     else:
         assert "Installation plan (no changes yet):" in text
+        assert "Web search provider: bingCustomSearch" in text
         assert "Proceed with provisioning and deployment [y/N]:" in text
         assert "Installation cancelled; Azure state was not changed." in text
         assert "Piano di installazione" not in text and "Procedere con" not in text
@@ -246,6 +250,7 @@ def test_interactive_success_writes_only_after_explicit_final_approval(
         assert config.ui_language == language
         assert config.websites == ("example.org", "docs.example.net")
         assert config.strict_websites is True
+        assert config.web_search_provider is cli.WebSearchProvider.BING_CUSTOM_SEARCH
         return {}
 
     flow.runner.side_effect = approved_runner
@@ -409,8 +414,9 @@ def test_dry_run_is_structured_and_never_executes(monkeypatch, capsys, mode, att
     cloud.assert_not_called()
 
 
+@pytest.mark.parametrize("provider", [None, "bingCustomSearch", "filteredWebSearch"])
 def test_noninteractive_install_dry_run_is_offline_and_deterministic(
-    monkeypatch, capsys
+    monkeypatch, capsys, provider
 ):
     run = Mock(side_effect=AssertionError("offline dry-run started a subprocess"))
     discovery = Mock(side_effect=AssertionError("offline dry-run contacted Azure"))
@@ -452,6 +458,8 @@ def test_noninteractive_install_dry_run_is_offline_and_deterministic(
         "--foundry-user-role-id",
         "/subscriptions/configured/providers/Microsoft.Authorization/roleDefinitions/foundry-user",
     ]
+    if provider is not None:
+        args += ["--web-search-provider", provider]
 
     assert cli.main(args) == 0
     captured = capsys.readouterr()
@@ -466,6 +474,20 @@ def test_noninteractive_install_dry_run_is_offline_and_deterministic(
     assert first["config"]["webGrounding"] == "web_search"
     assert first["config"]["websiteEnforcement"] == "allowed_domains"
     assert first["config"]["uiLanguage"] == "it"
+    expected_provider = provider or "bingCustomSearch"
+    assert first["config"]["webSearchProvider"] == expected_provider
+    assert first["postDeploy"]["webSearchProvider"] == expected_provider
+    assert first["postDeploy"]["configureBingCustomSearch"] is (
+        expected_provider == "bingCustomSearch"
+    )
+    provider_commands = [
+        command for command in first["commands"]
+        if command[:4] == ["azd", "env", "set", "WEB_SEARCH_PROVIDER"]
+    ]
+    assert provider_commands == [[
+        "azd", "env", "set", "WEB_SEARCH_PROVIDER", expected_provider,
+        "--environment", "chatbot-dev", "--no-prompt",
+    ]]
     configured_names = {
         command[3]
         for command in first["commands"]
@@ -597,6 +619,9 @@ def test_invalid_identifier_is_not_silently_replaced(capsys):
 
 def test_post_deploy_configures_the_runtime_agent_name(monkeypatch):
     captured = {}
+    forbidden_bing = Mock(side_effect=AssertionError("Legacy deployment must not verify Bing ARM resources"))
+    monkeypatch.setattr(cli, "AzureArmClient", forbidden_bing)
+    monkeypatch.setattr(cli, "verify_bing_custom_search", forbidden_bing)
 
     class RecordingWriter:
         def __init__(self, *args, **kwargs):
@@ -642,6 +667,7 @@ def test_post_deploy_configures_the_runtime_agent_name(monkeypatch):
     assert "bing_connection_name" not in captured["tools"]
     assert captured["owns_credential"] is True
     assert captured["writer_closed"] is True
+    forbidden_bing.assert_not_called()
 
 
 @pytest.mark.parametrize("operation_fails", [False, True])
@@ -689,12 +715,156 @@ def test_post_deploy_closes_foundry_client_before_credential(
     assert events == ["project_client", "credential"]
 
 
+@pytest.mark.parametrize("mode", [cli.KnowledgeMode.OFF, cli.KnowledgeMode.SEARCH_BLOB])
+@pytest.mark.parametrize("verification_fails", [False, True])
+def test_bing_post_deploy_verifies_persisted_policy_before_search_agent_and_runtime(
+    monkeypatch, mode, verification_fails,
+):
+    events = []
+    failure = cli.ConfigurationError(
+        "Bing Custom Search configuration does not match the authorized site policy."
+    )
+    values = bing_deployment_values(
+        WEB_GROUNDING_SITES="https://DOCS.EXAMPLE.ORG/,example.net",
+        KNOWLEDGE_MODE=mode.value,
+    )
+    if mode is cli.KnowledgeMode.SEARCH_BLOB:
+        search_values = search_deployment_values()
+        values.update({
+            name: search_values[name].replace("configured-subscription", _BING_SUBSCRIPTION_ID)
+            for _, name in cli._SEARCH_DEPLOYMENT_FIELDS
+        })
+    original_values = dict(values)
+    credential = SimpleNamespace(close=Mock(side_effect=lambda: events.append("credential-closed")))
+    project = SimpleNamespace(close=Mock(side_effect=lambda: events.append("project-closed")))
+    arm_reader = object()
+    credential_factory = Mock(return_value=credential)
+
+    def project_factory(*, endpoint, credential):
+        events.append("project-created")
+        return project
+
+    class ArmContext:
+        def __enter__(self):
+            credential.close.assert_not_called()
+            events.append("arm-entered")
+            return arm_reader
+
+        def __exit__(self, exc_type, exc, traceback):
+            assert exc is (failure if verification_fails else None)
+            credential.close.assert_not_called()
+            events.append("arm-closed")
+
+    arm_factory = Mock(return_value=ArmContext())
+    sdk_factory = Mock(side_effect=project_factory)
+
+    def verify(reader, resource_id, binding, domains):
+        assert events == ["project-created", "arm-entered"]
+        assert reader is arm_reader
+        assert resource_id == values["BING_CUSTOM_SEARCH_RESOURCE_ID"]
+        assert binding == cli.BingCustomSearchBinding(
+            values["BING_CUSTOM_SEARCH_CONNECTION_ID"], values["BING_CUSTOM_SEARCH_INSTANCE_NAME"],
+        )
+        assert domains == ("docs.example.org", "example.net")
+        events.append("verified")
+        if verification_fails:
+            raise failure
+
+    verifier = Mock(side_effect=verify)
+    search_client = Mock(return_value=object())
+    search = Mock()
+    search.configure.side_effect = lambda: events.append("search-configured")
+    search_factory = Mock(return_value=search)
+    agent = Mock()
+    agent.configure_tools.side_effect = lambda **_: events.append("agent-configured")
+
+    def create_agent(writer, *, agent_name):
+        assert events.index("verified") < events.index("arm-closed")
+        assert writer.credential is credential
+        assert agent_name == "helper"
+        events.append("agent-created")
+        return agent
+
+    agent_factory = Mock(side_effect=create_agent)
+    app_sync = Mock(side_effect=lambda *_: events.append("app-settings"))
+    runner = Mock()
+
+    def run(command):
+        assert command[:3] in (["azd", "env", "set"], ["azd", "deploy", "web"])
+        events.append("persist" if command[1] == "env" else "package")
+
+    runner.run.side_effect = run
+    forbidden = Mock(side_effect=AssertionError("No live subprocesses or Azure calls"))
+    monkeypatch.setitem(
+        sys.modules, "azure.identity",
+        SimpleNamespace(DefaultAzureCredential=credential_factory),
+    )
+    monkeypatch.setattr("azure.ai.projects.AIProjectClient", sdk_factory)
+    monkeypatch.setattr(cli, "AzureArmClient", arm_factory)
+    monkeypatch.setattr(cli, "verify_bing_custom_search", verifier)
+    monkeypatch.setattr(cli, "AzureRestClient", search_client)
+    monkeypatch.setattr(cli, "SearchBlobOrchestrator", search_factory)
+    monkeypatch.setattr(cli, "AgentToolOrchestrator", agent_factory)
+    monkeypatch.setattr(cli, "_sync_app_service_settings", app_sync)
+    monkeypatch.setattr(cli.subprocess, "run", forbidden)
+
+    if verification_fails:
+        with pytest.raises(cli.ConfigurationError) as caught:
+            cli._deploy_application(runner, deploy_config(mode=None), values)
+        assert caught.value is failure
+        search_client.assert_not_called()
+        search_factory.assert_not_called()
+        agent_factory.assert_not_called()
+        agent.configure_tools.assert_not_called()
+        app_sync.assert_not_called()
+        runner.run.assert_not_called()
+        assert events == [
+            "project-created", "arm-entered", "verified", "arm-closed",
+            "project-closed", "credential-closed",
+        ]
+    else:
+        resolved = cli._deploy_application(runner, deploy_config(mode=None), values)
+        agent.configure_tools.assert_called_once_with(
+            allowed_domains=("docs.example.org", "example.net"),
+            search_index_name="documents" if mode is cli.KnowledgeMode.SEARCH_BLOB else None,
+            search_connection_name="search-connection" if mode is cli.KnowledgeMode.SEARCH_BLOB else None,
+            bing_custom_search=resolved.bing_custom_search,
+        )
+        if mode is cli.KnowledgeMode.SEARCH_BLOB:
+            search_client.assert_called_once_with(
+                values["SEARCH_ENDPOINT"], credential, api_version="2024-07-01",
+                scope="https://search.azure.com/.default",
+            )
+            search.configure.assert_called_once_with()
+        else:
+            search_client.assert_not_called()
+            search_factory.assert_not_called()
+        assert events == [
+            "project-created", "arm-entered", "verified", "arm-closed",
+            *(["search-configured"] if mode is cli.KnowledgeMode.SEARCH_BLOB else []),
+            "agent-created", "agent-configured", "project-closed", "credential-closed",
+            "app-settings", "persist", "package",
+        ]
+        app_sync.assert_called_once_with(resolved, str(Path.cwd()))
+    verifier.assert_called_once()
+    arm_factory.assert_called_once_with(credential)
+    sdk_factory.assert_called_once_with(
+        endpoint=values["FOUNDRY_PROJECT_ENDPOINT"], credential=credential,
+    )
+    credential_factory.assert_called_once_with()
+    project.close.assert_called_once_with()
+    credential.close.assert_called_once_with()
+    forbidden.assert_not_called()
+    assert values == original_values
+
+
 def deploy_config(
     *,
     mode=cli.KnowledgeMode.OFF,
     chatbot_name=None,
     websites=(),
     ui_language=None,
+    web_search_provider=None,
 ):
     return cli.InstallerConfig(
         environment_name="chatbot-dev",
@@ -704,6 +874,7 @@ def deploy_config(
         model_deployment_name="chat-model",
         websites=websites,
         ui_language=ui_language,
+        web_search_provider=web_search_provider,
     )
 
 
@@ -720,6 +891,400 @@ def deployment_values(**overrides):
     }
     values.update(overrides)
     return values
+
+
+_BING_SUBSCRIPTION_ID = "15b936f3-7121-42d4-8d1b-36b9154d6e2c"
+_OTHER_SUBSCRIPTION_ID = "36a2849d-712a-4dcb-9907-c8ea586f6f2b"
+_BING_OUTPUT_NAMES = (
+    "BING_CUSTOM_SEARCH_CONNECTION_ID",
+    "BING_CUSTOM_SEARCH_INSTANCE_NAME",
+    "BING_CUSTOM_SEARCH_RESOURCE_ID",
+)
+
+
+def bing_deployment_values(**overrides):
+    scope = f"/subscriptions/{_BING_SUBSCRIPTION_ID}/resourceGroups/rg-chatbot-dev"
+    values = deployment_values(
+        AZURE_SUBSCRIPTION_ID=_BING_SUBSCRIPTION_ID,
+        CHATBOT_NAME="helper",
+        KNOWLEDGE_MODE="off",
+        UI_LANGUAGE="en",
+        WEB_SEARCH_PROVIDER="bingCustomSearch",
+        BING_CUSTOM_SEARCH_CONNECTION_ID=(
+            f"{scope}/providers/Microsoft.CognitiveServices/accounts/example"
+            "/projects/project/connections/bing-custom-search"
+        ),
+        BING_CUSTOM_SEARCH_INSTANCE_NAME="WebsitePolicy",
+        BING_CUSTOM_SEARCH_RESOURCE_ID=f"{scope}/providers/Microsoft.Bing/accounts/bing-example",
+    )
+    values.update(overrides)
+    return values
+
+
+def test_deploy_provider_parser_and_model_preserve_unspecified_selection():
+    parser = cli.build_parser()
+
+    assert parser.parse_args(["deploy"]).web_search_provider is None
+    assert cli.InstallerConfig.from_values(None, environ={}).web_search_provider is None
+    for provider in cli.WebSearchProvider:
+        assert parser.parse_args([
+            "deploy", "--web-search-provider", provider.value,
+        ]).web_search_provider == provider.value
+        assert cli.InstallerConfig.from_values(
+            None, environ={"WEB_SEARCH_PROVIDER": provider.value},
+        ).web_search_provider is provider
+    with pytest.raises(SystemExit):
+        parser.parse_args(["deploy", "--web-search-provider", "unsupported"])
+
+
+@pytest.mark.parametrize(("stored_provider", "explicit_provider", "expected_provider"), [
+    (None, None, "filteredWebSearch"),
+    ("filteredWebSearch", None, "filteredWebSearch"),
+    ("bingCustomSearch", None, "bingCustomSearch"),
+    (None, "bingCustomSearch", "bingCustomSearch"),
+    ("filteredWebSearch", "bingCustomSearch", "bingCustomSearch"),
+    ("bingCustomSearch", "filteredWebSearch", "filteredWebSearch"),
+    ("invalid", "filteredWebSearch", "filteredWebSearch"),
+])
+def test_deploy_resolves_provider_binding_and_runtime_settings_together(
+    stored_provider, explicit_provider, expected_provider,
+):
+    values = bing_deployment_values()
+    if stored_provider is None:
+        del values["WEB_SEARCH_PROVIDER"]
+    else:
+        values["WEB_SEARCH_PROVIDER"] = stored_provider
+    before = dict(values)
+
+    resolved = cli._resolve_deploy_config(
+        deploy_config(web_search_provider=(
+            cli.WebSearchProvider(explicit_provider) if explicit_provider else None
+        )),
+        values,
+    )
+
+    assert resolved.config.web_search_provider is cli.WebSearchProvider(expected_provider)
+    assert resolved.app_settings["WEB_SEARCH_PROVIDER"] == expected_provider
+    if expected_provider == "bingCustomSearch":
+        assert resolved.bing_custom_search == cli.BingCustomSearchBinding(
+            values["BING_CUSTOM_SEARCH_CONNECTION_ID"], values["BING_CUSTOM_SEARCH_INSTANCE_NAME"],
+        )
+        assert resolved.bing_custom_search_resource_id == values["BING_CUSTOM_SEARCH_RESOURCE_ID"]
+        for name in _BING_OUTPUT_NAMES[:2]:
+            assert resolved.app_settings[name] == values[name]
+    else:
+        assert resolved.bing_custom_search is None
+        assert resolved.bing_custom_search_resource_id is None
+        assert resolved.app_settings["BING_CUSTOM_SEARCH_CONNECTION_ID"] == ""
+        assert resolved.app_settings["BING_CUSTOM_SEARCH_INSTANCE_NAME"] == ""
+    assert "BING_CUSTOM_SEARCH_RESOURCE_ID" not in resolved.app_settings
+    assert values == before
+
+
+def test_bing_deploy_scope_matching_is_case_insensitive_but_preserves_instance_name():
+    values = bing_deployment_values()
+    for name in ("BING_CUSTOM_SEARCH_CONNECTION_ID", "BING_CUSTOM_SEARCH_RESOURCE_ID"):
+        values[name] = values[name].upper()
+
+    resolved = cli._resolve_deploy_config(deploy_config(), values)
+
+    assert resolved.bing_custom_search.instance_name == "WebsitePolicy"
+    assert resolved.bing_custom_search.connection_id == values["BING_CUSTOM_SEARCH_CONNECTION_ID"]
+    assert resolved.bing_custom_search_resource_id == values["BING_CUSTOM_SEARCH_RESOURCE_ID"]
+
+
+@pytest.fixture
+def forbidden_deploy_effects(monkeypatch):
+    forbidden = Mock(side_effect=AssertionError("Invalid deployment must not contact Azure"))
+    monkeypatch.setattr(cli, "_configure_post_deploy", forbidden)
+    monkeypatch.setattr(cli, "_sync_app_service_settings", forbidden)
+    monkeypatch.setattr(cli.subprocess, "run", forbidden)
+    return SimpleNamespace(run=forbidden), forbidden
+
+
+@pytest.mark.parametrize("missing_names", [
+    _BING_OUTPUT_NAMES,
+    *[(name,) for name in _BING_OUTPUT_NAMES],
+])
+def test_bing_missing_or_partial_outputs_fail_before_deploy_side_effects(
+    forbidden_deploy_effects, missing_names,
+):
+    runner, forbidden = forbidden_deploy_effects
+    values = bing_deployment_values()
+    for name in missing_names:
+        del values[name]
+
+    with pytest.raises(cli.ConfigurationError, match="Bing Custom Search|BING_CUSTOM_SEARCH"):
+        cli._deploy_application(runner, deploy_config(), values)
+
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("name", _BING_OUTPUT_NAMES)
+@pytest.mark.parametrize("value", ["", "   ", None, 123])
+def test_bing_blank_or_nonstring_outputs_fail_before_deploy_side_effects(
+    forbidden_deploy_effects, name, value,
+):
+    runner, forbidden = forbidden_deploy_effects
+    with pytest.raises(cli.ConfigurationError, match="Bing Custom Search|BING_CUSTOM_SEARCH"):
+        cli._deploy_application(runner, deploy_config(), bing_deployment_values(**{name: value}))
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize(("name", "old", "new"), [
+    ("BING_CUSTOM_SEARCH_CONNECTION_ID", _BING_SUBSCRIPTION_ID, _OTHER_SUBSCRIPTION_ID),
+    ("BING_CUSTOM_SEARCH_CONNECTION_ID", "rg-chatbot-dev", "rg-other"),
+    ("BING_CUSTOM_SEARCH_CONNECTION_ID", "/accounts/example/", "/accounts/other/"),
+    ("BING_CUSTOM_SEARCH_CONNECTION_ID", "/projects/project/", "/projects/other/"),
+    ("BING_CUSTOM_SEARCH_CONNECTION_ID", "/projects/project", ""),
+    ("BING_CUSTOM_SEARCH_CONNECTION_ID", "/connections/bing-custom-search", "/connections/bing-custom-search/child"),
+    ("BING_CUSTOM_SEARCH_CONNECTION_ID", _BING_SUBSCRIPTION_ID, "not-a-guid"),
+    ("BING_CUSTOM_SEARCH_INSTANCE_NAME", "WebsitePolicy", "invalid/policy"),
+    ("BING_CUSTOM_SEARCH_RESOURCE_ID", _BING_SUBSCRIPTION_ID, _OTHER_SUBSCRIPTION_ID),
+    ("BING_CUSTOM_SEARCH_RESOURCE_ID", "rg-chatbot-dev", "rg-other"),
+    ("BING_CUSTOM_SEARCH_RESOURCE_ID", "Microsoft.Bing", "Microsoft.CognitiveServices"),
+    ("BING_CUSTOM_SEARCH_RESOURCE_ID", "bing-example", "bing-example/child"),
+])
+def test_bing_malformed_or_mismatched_outputs_fail_before_deploy_side_effects(
+    forbidden_deploy_effects, name, old, new,
+):
+    runner, forbidden = forbidden_deploy_effects
+    values = bing_deployment_values()
+    values[name] = values[name].replace(old, new)
+
+    with pytest.raises(cli.ConfigurationError, match="Bing Custom Search|BING_CUSTOM_SEARCH"):
+        cli._deploy_application(runner, deploy_config(), values)
+
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("provider", ["", " ", "unknown", None, 123])
+def test_invalid_persisted_provider_fails_before_deploy_side_effects(
+    forbidden_deploy_effects, provider,
+):
+    runner, forbidden = forbidden_deploy_effects
+    with pytest.raises(cli.ConfigurationError, match="WEB_SEARCH_PROVIDER"):
+        cli._deploy_application(
+            runner, deploy_config(), deployment_values(WEB_SEARCH_PROVIDER=provider),
+        )
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_legacy_selection_ignores_and_clears_malformed_stale_bing_bindings(explicit):
+    values = deployment_values(
+        WEB_SEARCH_PROVIDER="bingCustomSearch" if explicit else "filteredWebSearch",
+        BING_CUSTOM_SEARCH_CONNECTION_ID="not-an-arm-id",
+        BING_CUSTOM_SEARCH_INSTANCE_NAME=None,
+        BING_CUSTOM_SEARCH_RESOURCE_ID="not-an-arm-id",
+    )
+    resolved = cli._resolve_deploy_config(
+        deploy_config(web_search_provider=(
+            cli.WebSearchProvider.FILTERED_WEB_SEARCH if explicit else None
+        )),
+        values,
+    )
+
+    assert resolved.config.web_search_provider is cli.WebSearchProvider.FILTERED_WEB_SEARCH
+    assert resolved.bing_custom_search is None
+    assert resolved.bing_custom_search_resource_id is None
+    assert resolved.app_settings["BING_CUSTOM_SEARCH_CONNECTION_ID"] == ""
+    assert resolved.app_settings["BING_CUSTOM_SEARCH_INSTANCE_NAME"] == ""
+
+
+@pytest.mark.parametrize(("provider", "expected"), [
+    (None, "filteredWebSearch"),
+    ("filteredWebSearch", "filteredWebSearch"),
+    ("bingCustomSearch", "bingCustomSearch"),
+])
+def test_provider_plan_reports_the_selected_provider_without_azure_calls(
+    monkeypatch, capsys, provider, expected,
+):
+    forbidden = Mock(side_effect=AssertionError("Provider planning must remain offline"))
+    monkeypatch.setattr(cli.os, "environ", {})
+    for name in ("AzdRunner", "AzureProvisioner", "_configure_post_deploy"):
+        monkeypatch.setattr(cli, name, forbidden)
+    monkeypatch.setattr(cli.subprocess, "run", forbidden)
+    arguments = ["plan", "--mode", "off", "--dry-run", "--websites", "docs.example.org"]
+    if provider is not None:
+        arguments += ["--web-search-provider", provider]
+
+    assert cli.main(arguments) == 0
+    plan = json.loads(capsys.readouterr().out)
+
+    assert plan["config"]["webSearchProvider"] == expected
+    assert plan["postDeploy"]["webSearchProvider"] == expected
+    assert plan["postDeploy"]["configureBingCustomSearch"] is (expected == "bingCustomSearch")
+    assert plan["postDeploy"]["websiteEnforcement"] == "allowed_domains"
+    assert plan["config"]["websites"] == "docs.example.org"
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize(("action", "stored_provider", "override", "expected"), [
+    ("install", None, None, "bingCustomSearch"),
+    ("deploy", "bingCustomSearch", None, "bingCustomSearch"),
+    ("deploy", "filteredWebSearch", "bingCustomSearch", "bingCustomSearch"),
+    ("deploy", "bingCustomSearch", "filteredWebSearch", "filteredWebSearch"),
+    ("deploy", "filteredWebSearch", None, "filteredWebSearch"),
+    ("deploy", None, None, "filteredWebSearch"),
+])
+def test_provider_and_binding_pair_reach_app_and_azd_before_packaging(
+    monkeypatch, capsys, action, stored_provider, override, expected,
+):
+    from app.backend.config import AppSettings
+    from azure_bing_assistant import azd
+
+    outputs = bing_deployment_values()
+    persisted = {} if action == "install" else dict(outputs)
+    if action == "deploy":
+        if stored_provider is None:
+            del persisted["WEB_SEARCH_PROVIDER"]
+            for name in _BING_OUTPUT_NAMES:
+                del persisted[name]
+        else:
+            persisted["WEB_SEARCH_PROVIDER"] = stored_provider
+    original_persisted = dict(persisted)
+    expected_settings = {
+        "WEB_SEARCH_PROVIDER": expected,
+        "BING_CUSTOM_SEARCH_CONNECTION_ID": (
+            outputs["BING_CUSTOM_SEARCH_CONNECTION_ID"] if expected == "bingCustomSearch" else ""
+        ),
+        "BING_CUSTOM_SEARCH_INSTANCE_NAME": (
+            outputs["BING_CUSTOM_SEARCH_INSTANCE_NAME"] if expected == "bingCustomSearch" else ""
+        ),
+    }
+    current = {
+        "FOUNDRY_PROJECT_ENDPOINT": outputs["FOUNDRY_PROJECT_ENDPOINT"],
+        "CHATBOT_NAME": "helper",
+        "WEB_GROUNDING_SITES": "docs.example.org",
+        "KNOWLEDGE_MODE": "off",
+        "UI_LANGUAGE": "en",
+        "UNRELATED_SETTING": "preserved",
+        "WEB_SEARCH_PROVIDER": (
+            "filteredWebSearch" if expected == "bingCustomSearch" else "bingCustomSearch"
+        ),
+        "BING_CUSTOM_SEARCH_CONNECTION_ID": (
+            "" if expected == "bingCustomSearch" else outputs["BING_CUSTOM_SEARCH_CONNECTION_ID"]
+        ),
+        "BING_CUSTOM_SEARCH_INSTANCE_NAME": (
+            "" if expected == "bingCustomSearch" else outputs["BING_CUSTOM_SEARCH_INSTANCE_NAME"]
+        ),
+    }
+    before = dict(current)
+    events = []
+    resolved_configs = []
+
+    class Runner:
+        def ensure_environment(self, name):
+            assert name == "chatbot-dev"
+
+        def get_environment_values(self, name):
+            assert name == "chatbot-dev"
+            return dict(persisted)
+
+        def run(self, command):
+            if command[:3] == ["azd", "env", "set"]:
+                assert command[5:] == ["--environment", "chatbot-dev", "--no-prompt"]
+                persisted[command[3]] = command[4]
+                events.append(("persist", command[3], command[4]))
+            else:
+                assert command == [
+                    "azd", "deploy", "web", "--environment", "chatbot-dev", "--no-prompt",
+                ]
+                for name, value in expected_settings.items():
+                    assert persisted[name] == current[name] == value
+                events.append(("package",))
+
+    def provision(config):
+        assert action == "install"
+        assert config.web_search_provider is cli.WebSearchProvider.BING_CUSTOM_SEARCH
+        events.append(("provision",))
+        return {name: outputs[name] for name in (
+            "AZURE_SUBSCRIPTION_ID", "AZURE_RESOURCE_GROUP", "SERVICE_WEB_NAME",
+            "FOUNDRY_PROJECT_ENDPOINT", *_BING_OUTPUT_NAMES,
+        )}
+
+    def configure_foundry(resolved):
+        assert resolved.config.web_search_provider is cli.WebSearchProvider(expected)
+        assert (resolved.bing_custom_search is not None) is (expected == "bingCustomSearch")
+        resolved_configs.append(resolved)
+        events.append(("foundry",))
+
+    def settings_command(command, **kwargs):
+        assert command[:4] == ["az", "webapp", "config", "appsettings"]
+        assert command[command.index("--subscription") + 1] == _BING_SUBSCRIPTION_ID
+        assert command[command.index("--resource-group") + 1] == "rg-chatbot-dev"
+        assert command[command.index("--name") + 1] == "app-chatbot-dev"
+        assert kwargs["shell"] is False
+        if command[4] == "list":
+            query = command[command.index("--query") + 1]
+            names = [
+                clause.removeprefix("name=='").removesuffix("'")
+                for clause in query[2:query.index("]")].split(" || ")
+            ]
+            assert set(names) == {
+                "CHATBOT_NAME", "WEB_GROUNDING_SITES", "KNOWLEDGE_MODE", "UI_LANGUAGE",
+                "STORAGE_ACCOUNT_NAME", "STORAGE_CONTAINER_NAME", *expected_settings,
+            }
+            events.append(("app-read",))
+            return Mock(returncode=0, stderr="", stdout=json.dumps([
+                {"name": name, "value": current[name]} for name in names if name in current
+            ]))
+        assert command[4] == "set"
+        updates = command[command.index("--settings") + 1:command.index("--output")]
+        assert dict(item.split("=", 1) for item in updates) == expected_settings
+        current.update(item.split("=", 1) for item in updates)
+        events.append(("app-write",))
+        return Mock(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(cli.os, "environ", {})
+    monkeypatch.setattr(cli, "AzdRunner", lambda _: Runner())
+    monkeypatch.setattr(cli, "AzureProvisioner", lambda _: SimpleNamespace(run=provision))
+    monkeypatch.setattr(cli, "_configure_post_deploy", configure_foundry)
+    monkeypatch.setattr(azd, "azure_cli_invocation", lambda command: (list(command), {}))
+    monkeypatch.setattr(azd.subprocess, "run", settings_command)
+    arguments = [action, "--environment", "chatbot-dev", "--ui-language", "en"]
+    if override is not None:
+        arguments += ["--web-search-provider", override]
+    if action == "install":
+        arguments += [
+            "--non-interactive", "--subscription", _BING_SUBSCRIPTION_ID,
+            "--resource-group", "rg-chatbot-dev", "--location", "westeurope",
+            "--model-name", "example-model", "--model-version", "1",
+            "--model-format", "OpenAI", "--model-sku", "GlobalStandard",
+            "--model-capacity", "10", "--deployment-name", "chat-model",
+            "--chatbot-name", "helper", "--websites", "docs.example.org",
+            "--accept-bing-terms", "--foundry-user-role-id",
+            f"/subscriptions/{_BING_SUBSCRIPTION_ID}/providers/"
+            "Microsoft.Authorization/roleDefinitions/a97b65f3-24c7-4388-baec-2e87135dc908",
+        ]
+
+    assert cli.main(arguments) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "succeeded"
+    assert events.index(("foundry",)) < events.index(("app-read",))
+    assert events.index(("app-read",)) < events.index(("app-write",)) < events.index(("package",))
+    assert sum(event == ("app-write",) for event in events) == 1
+    assert current == {**before, **expected_settings}
+    if action == "deploy":
+        assert events[0] == ("foundry",)
+        assert [event for event in events if event[0] == "persist"] == [
+            ("persist", name, value) for name, value in expected_settings.items()
+            if original_persisted.get(name) != value
+        ]
+        assert all(
+            index > events.index(("app-write",))
+            for index, event in enumerate(events) if event[0] == "persist"
+        )
+    else:
+        assert events.index(("provision",)) < events.index(("foundry",))
+    assert events[-1] == ("package",)
+    settings = AppSettings.from_environment(current)
+    assert settings.bing_custom_search == resolved_configs[0].bing_custom_search
+    if action == "deploy":
+        events.clear()
+        assert cli.main(arguments) == 0
+        assert json.loads(capsys.readouterr().out)["status"] == "succeeded"
+        assert events == [("foundry",), ("app-read",), ("package",)]
 
 
 def test_observed_arm_casing_is_persisted_with_canonical_azd_keys():
@@ -933,6 +1498,9 @@ def test_explicit_standalone_values_configure_foundry_then_app_then_deploy(
             ),
             "KNOWLEDGE_MODE": "off",
             "UI_LANGUAGE": "en",
+            "WEB_SEARCH_PROVIDER": "filteredWebSearch",
+            "BING_CUSTOM_SEARCH_CONNECTION_ID": "",
+            "BING_CUSTOM_SEARCH_INSTANCE_NAME": "",
         },
         "app-chatbot-dev",
     )
@@ -951,6 +1519,9 @@ def test_persisted_deploy_avoids_divergent_environment_writes(monkeypatch):
         WEB_GROUNDING_SITES="docs.example.org",
         KNOWLEDGE_MODE="off",
         UI_LANGUAGE="it",
+        WEB_SEARCH_PROVIDER="filteredWebSearch",
+        BING_CUSTOM_SEARCH_CONNECTION_ID="",
+        BING_CUSTOM_SEARCH_INSTANCE_NAME="",
     )
 
     class FakeRunner:
@@ -1058,6 +1629,9 @@ def test_package_failure_occurs_after_valid_agent_and_runtime(monkeypatch, timed
                 WEB_GROUNDING_SITES="docs.example.org",
                 KNOWLEDGE_MODE="off",
                 UI_LANGUAGE="it",
+                WEB_SEARCH_PROVIDER="filteredWebSearch",
+                BING_CUSTOM_SEARCH_CONNECTION_ID="",
+                BING_CUSTOM_SEARCH_INSTANCE_NAME="",
             ),
         )
 
@@ -1140,6 +1714,9 @@ def test_cross_mode_transitions_use_one_effective_state_and_order(
             "WEB_GROUNDING_SITES": "docs.example.org",
             "KNOWLEDGE_MODE": expected_mode,
             "UI_LANGUAGE": "it",
+            "WEB_SEARCH_PROVIDER": "filteredWebSearch",
+            "BING_CUSTOM_SEARCH_CONNECTION_ID": "",
+            "BING_CUSTOM_SEARCH_INSTANCE_NAME": "",
             **({
                 "STORAGE_ACCOUNT_NAME": "chatbotstorage",
                 "STORAGE_CONTAINER_NAME": "documents",
@@ -1169,6 +1746,9 @@ def test_legacy_deploy_without_persisted_mode_safely_resolves_and_persists_off(
     values = deployment_values(
         CHATBOT_NAME="helper",
         WEB_GROUNDING_SITES="docs.example.org",
+        WEB_SEARCH_PROVIDER="filteredWebSearch",
+        BING_CUSTOM_SEARCH_CONNECTION_ID="",
+        BING_CUSTOM_SEARCH_INSTANCE_NAME="",
     )
     monkeypatch.setattr(cli, "_configure_post_deploy", lambda resolved: None)
     monkeypatch.setattr(cli, "_sync_app_service_settings", lambda resolved, cwd: False)
@@ -1307,6 +1887,9 @@ def test_search_storage_reaches_backend_through_real_settings_commands_before_pa
         "UI_WELCOME_TITLE": "Custom welcome",
         "UNRELATED_SETTING": "preserved",
         "API_KEY": "synthetic-not-for-sync",
+        "WEB_SEARCH_PROVIDER": "filteredWebSearch",
+        "BING_CUSTOM_SEARCH_CONNECTION_ID": "",
+        "BING_CUSTOM_SEARCH_INSTANCE_NAME": "",
     }
     before = dict(current)
     events = []
@@ -1356,6 +1939,8 @@ def test_search_storage_reaches_backend_through_real_settings_commands_before_pa
             assert set(names) == {
                 "CHATBOT_NAME", "WEB_GROUNDING_SITES", "KNOWLEDGE_MODE", "UI_LANGUAGE",
                 "STORAGE_ACCOUNT_NAME", "STORAGE_CONTAINER_NAME",
+                "WEB_SEARCH_PROVIDER",
+                "BING_CUSTOM_SEARCH_CONNECTION_ID", "BING_CUSTOM_SEARCH_INSTANCE_NAME",
             }
             return Mock(returncode=0, stderr="", stdout=json.dumps([
                 {"name": name, "value": current[name]} for name in names if name in current
@@ -1379,6 +1964,7 @@ def test_search_storage_reaches_backend_through_real_settings_commands_before_pa
     monkeypatch.setattr(cli.os, "environ", {})
     arguments = [
         action, "--mode", "searchBlob", "--environment", "chatbot-dev", "--ui-language", "en",
+        "--web-search-provider", "filteredWebSearch",
     ]
     if action == "install":
         role_prefix = (
@@ -1491,6 +2077,9 @@ def test_search_storage_reaches_backend_through_real_settings_commands_before_pa
 
 def test_searchblob_effective_mode_reaches_search_and_foundry_adapters(monkeypatch):
     events = []
+    forbidden_bing = Mock(side_effect=AssertionError("Legacy document search must not verify Bing ARM resources"))
+    monkeypatch.setattr(cli, "AzureArmClient", forbidden_bing)
+    monkeypatch.setattr(cli, "verify_bing_custom_search", forbidden_bing)
 
     class RecordingWriter:
         def __init__(self, *args, **kwargs):
@@ -1544,6 +2133,7 @@ def test_searchblob_effective_mode_reaches_search_and_foundry_adapters(monkeypat
     )
     assert events[0] == ("writer-created", True)
     assert events[-1] == ("writer-closed",)
+    forbidden_bing.assert_not_called()
 
 
 def test_explicit_override_requires_persisted_app_identity():
@@ -1570,6 +2160,7 @@ def test_ui_config_flows_from_cli_plan_to_bicep_and_runtime(monkeypatch, capsys)
     )
     arguments = [
         "install", "--non-interactive", "--dry-run", "--mode", "off",
+        "--web-search-provider", "filteredWebSearch",
         "--environment", "chatbot-dev", "--subscription", "subscription",
         "--resource-group", "rg-chatbot-dev", "--location", "westeurope",
         "--model-name", "model", "--model-version", "1",
@@ -1611,6 +2202,15 @@ def test_ui_config_flows_from_cli_plan_to_bicep_and_runtime(monkeypatch, capsys)
         "compile": "Bicep to stdout",
         "transport": "authenticated Azure Resource Manager HTTPS",
         "parameters": "non-secret in-memory request body",
+        "resume": {
+            "inspectPreviousDeployment": True,
+            "waitForActiveDeployment": True,
+            "compareExistingResourcesWithWhatIf": True,
+            "reuseOnlyVerifiedUnchangedInfrastructureOutputs": True,
+            "otherwise": "incremental reconciliation with saved resource names",
+            "deleteResources": False,
+            "skipApplicationDeployment": False,
+        },
     }
 
     webapp = (
@@ -1648,6 +2248,7 @@ def test_ui_config_flows_from_cli_plan_to_bicep_and_runtime(monkeypatch, capsys)
         "suggestedQuestions": ["First question?", "Second question?"],
         "knowledgeMode": "off",
         "allowedDomains": ["docs.example.org"],
+        "webSearchProvider": "filteredWebSearch",
         "websiteEnforcement": "allowed_domains",
         "includesSubdomains": True,
     }

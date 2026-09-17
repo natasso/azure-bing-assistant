@@ -96,11 +96,19 @@ sensibili o riservati senza una base e controlli approvati.
 
 Non committare `.env`, directory azd, token, password, chiavi, connection
 string, file parametri, ARM JSON generato, endpoint privati, documenti o export
-tenant. La ricerca nativa filtrata non richiede chiave/connessione Bing standalone.
-Il template incrementale non elimina quelle eventualmente già presenti.
+tenant. Con `bingCustomSearch`, ARM legge la chiave Bing lato server e la salva
+nella connessione Foundry ApiKey. Installer e runtime usano Entra per Foundry;
+non significa che il servizio Bing usi Managed Identity. Nessuna chiave Bing
+passa in argomenti CLI, output ARM, ambiente azd, App Service o browser.
+Il provider legacy `filteredWebSearch` non richiede questa connessione.
+Il template incrementale non elimina risorse o connessioni eventualmente già presenti.
 
 La policy web è applicata con `web_search.filters.allowed_domains`, non dal prompt.
-Il runtime verifica l'esatta versione agente prima dell'inferenza e i metadati di
+Il post-deploy Custom Search legge risorsa, configurazione e connessione senza
+credenziali prima di configurare l'agente. Configurazioni vuote, diverse o non
+verificabili bloccano il deploy. Il runtime verifica anche l'esatto ID connessione
+e nome configurazione quando Custom Search è selezionato; non legge chiavi Bing
+né riceve Contributor sulla risorsa. Il runtime verifica l'esatta versione agente prima dell'inferenza e i metadati di
 fonti/URL dopo. Non usa tool web alternativi in caso di errore. Evidenza esterna,
 tool non filtrati o metadati mancanti bloccano la risposta; non vengono scartate
 solo le citazioni scomode. Un link di query Bing `www.bing.com/search` non è una
@@ -221,11 +229,19 @@ controls.
 
 Do not commit `.env`, azd directories, tokens, passwords, keys, connection
 strings, parameter files, generated ARM JSON, private endpoints, documents, or
-tenant exports. Native filtered search needs no standalone Bing key/connection.
-The incremental template does not delete existing ones.
+tenant exports. With `bingCustomSearch`, ARM reads the Bing key server-side and
+stores it in the Foundry ApiKey connection. Installer and runtime use Entra for
+Foundry; this does not mean the Bing service uses Managed Identity. No Bing key
+is passed in CLI arguments, ARM outputs, azd state, App Service settings, or the
+browser. Legacy `filteredWebSearch` needs no such connection. Incremental
+deployment does not delete existing resources or connections.
 
 Web policy uses `web_search.filters.allowed_domains`, not a prompt boundary.
-Runtime verifies the exact agent version before inference and source/URL metadata
+Custom Search post-deploy reads the resource, configuration, and credential-free
+connection before configuring the agent. Empty, different, or unverifiable
+configurations block deployment. Runtime also verifies the exact connection ID
+and configuration name when Custom Search is selected; it neither reads Bing keys
+nor receives Contributor on the Bing resource. Runtime verifies the exact agent version before inference and source/URL metadata
 afterwards, never retrying with alternative broad tools. Outside evidence,
 unfiltered tools, or missing metadata block the entire answer, rather than just
 hiding inconvenient citations. A `www.bing.com/search` query link is not a consulted

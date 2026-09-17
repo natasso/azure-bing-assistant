@@ -20,11 +20,15 @@ from urllib.parse import urlsplit
 from .agent import AgentToolOrchestrator, FoundrySdkWriter
 from .azure_cli import AzureCliResolutionError, azure_cli_invocation
 from .azd import AppServiceSettingsSynchronizer, AzdError, AzdRunner, redact
+from .bing_binding import BingCustomSearchBinding
+from .bing_setup import validate_bing_resource_id, verify_bing_custom_search
 from .config import (
     DEFAULT_UI_LANGUAGE,
     ConfigurationError,
     InstallerConfig,
     KnowledgeMode,
+    WebSearchProvider,
+    parse_web_search_provider,
     validate_ui_language,
     validate_foundry_name_salt,
     validate_websites,
@@ -34,7 +38,7 @@ from .installer_messages import InstallerMessageError, InstallerMessages
 from .install_progress import InstallProgress
 from .installer_access import ACCESS_MESSAGES, FOUNDRY_USER_ROLE_ID, configure_with_project_access
 from .localization import SUPPORTED_UI_LANGUAGES
-from .provision import AzureProvisioner, DeploymentFailedError, ProvisioningError, provision_argv
+from .provision import AzureArmClient, AzureProvisioner, DeploymentFailedError, ProvisioningError, provision_argv
 from .recovery import format_recovery
 from .search_blob import AzureRestClient, SearchBlobOrchestrator, SearchBlobSettings
 from .wizard import (
@@ -155,6 +159,15 @@ def _plan(
             "compile": "Bicep to stdout",
             "transport": "authenticated Azure Resource Manager HTTPS",
             "parameters": "non-secret in-memory request body",
+            "resume": {
+                "inspectPreviousDeployment": True,
+                "waitForActiveDeployment": True,
+                "compareExistingResourcesWithWhatIf": True,
+                "reuseOnlyVerifiedUnchangedInfrastructureOutputs": True,
+                "otherwise": "incremental reconciliation with saved resource names",
+                "deleteResources": False,
+                "skipApplicationDeployment": False,
+            },
         },
         "postDeploy": {
             "installerProjectAccess": {
@@ -168,6 +181,10 @@ def _plan(
                 "broaderRoleFallback": False,
             },
             "attachFilteredWebSearch": True,
+            "webSearchProvider": (
+                config.web_search_provider or WebSearchProvider.FILTERED_WEB_SEARCH
+            ).value,
+            "configureBingCustomSearch": config.web_search_provider is WebSearchProvider.BING_CUSTOM_SEARCH,
             "websiteEnforcement": "allowed_domains",
             "attachSearchTool": search_configured,
             "configureBlobIndexer": search_configured,
@@ -199,6 +216,9 @@ def _interactive_plan(
         ("Create resource group", tr("Yes" if config.create_resource_group else "No")),
         ("Installation name", config.environment_name),
         ("Region", config.location),
+        ("Web search provider", (
+            config.web_search_provider or WebSearchProvider.FILTERED_WEB_SEARCH
+        ).value),
         ("Model / version / format / SKU", " / ".join((
             config.model_name or "", config.model_version or "",
             config.model_format or "", config.model_sku or "",
@@ -275,6 +295,8 @@ class ResolvedDeployConfig:
     storage_resource_id: str | None = None
     storage_account_name: str | None = None
     storage_container_name: str | None = None
+    bing_custom_search: BingCustomSearchBinding | None = None
+    bing_custom_search_resource_id: str | None = None
 
     @property
     def app_settings(self) -> dict[str, str]:
@@ -283,6 +305,15 @@ class ResolvedDeployConfig:
         return {
             "CHATBOT_NAME": self.config.chatbot_name or _DEFAULT_AGENT_NAME,
             "WEB_GROUNDING_SITES": ",".join(self.config.websites),
+            "WEB_SEARCH_PROVIDER": (
+                self.config.web_search_provider or WebSearchProvider.FILTERED_WEB_SEARCH
+            ).value,
+            "BING_CUSTOM_SEARCH_CONNECTION_ID": (
+                self.bing_custom_search.connection_id if self.bing_custom_search else ""
+            ),
+            "BING_CUSTOM_SEARCH_INSTANCE_NAME": (
+                self.bing_custom_search.instance_name if self.bing_custom_search else ""
+            ),
             "KNOWLEDGE_MODE": self.config.knowledge_mode.value,
             "UI_LANGUAGE": self.config.ui_language or DEFAULT_UI_LANGUAGE,
             **({
@@ -443,6 +474,16 @@ def _resolve_deploy_config(
     persisted = deployment_values or {}
     knowledge_mode = _effective_knowledge_mode(config.knowledge_mode, persisted)
     ui_language = _effective_ui_language(config.ui_language, persisted)
+    web_search_provider = config.web_search_provider
+    if web_search_provider is None:
+        stored_provider = persisted.get(
+            "WEB_SEARCH_PROVIDER", WebSearchProvider.FILTERED_WEB_SEARCH.value,
+        )
+        if not isinstance(stored_provider, str):
+            raise ConfigurationError(
+                "WEB_SEARCH_PROVIDER must be 'filteredWebSearch' or 'bingCustomSearch'"
+            )
+        web_search_provider = parse_web_search_provider(stored_provider)
     agent_name = config.chatbot_name
     if agent_name is None:
         stored_agent_name = persisted.get("CHATBOT_NAME")
@@ -477,6 +518,7 @@ def _resolve_deploy_config(
         model_deployment_name=model_deployment_name,
         subscription_id=subscription_id,
         resource_group_name=resource_group,
+        web_search_provider=web_search_provider,
     )
     search_values: dict[str, str | None] = {
         "search_endpoint": None,
@@ -499,10 +541,36 @@ def _resolve_deploy_config(
     foundry_project_endpoint = _validate_foundry_endpoint(
         _required_environment("FOUNDRY_PROJECT_ENDPOINT", persisted)
     )
+    bing_binding = None
+    bing_resource_id = None
+    if web_search_provider is WebSearchProvider.BING_CUSTOM_SEARCH:
+        try:
+            bing_binding = BingCustomSearchBinding(
+                _required_environment("BING_CUSTOM_SEARCH_CONNECTION_ID", persisted),
+                _required_environment("BING_CUSTOM_SEARCH_INSTANCE_NAME", persisted),
+            )
+        except ValueError as exc:
+            raise ConfigurationError("Invalid Bing Custom Search binding in deployment outputs") from exc
+        endpoint = urlsplit(foundry_project_endpoint)
+        account_name = (endpoint.hostname or "").removesuffix(".services.ai.azure.com")
+        project_name = endpoint.path.rstrip("/").rsplit("/", 1)[1]
+        project_id = (
+            f"/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/"
+            f"Microsoft.CognitiveServices/accounts/{account_name}/projects/{project_name}"
+        )
+        if not bing_binding.connection_id.casefold().startswith(
+            project_id.casefold() + "/connections/",
+        ):
+            raise ConfigurationError("Bing Custom Search connection must belong to the configured Foundry project")
+        bing_resource_id = validate_bing_resource_id(
+            _required_environment("BING_CUSTOM_SEARCH_RESOURCE_ID", persisted), bing_binding,
+        )
     return ResolvedDeployConfig(
         config=effective,
         foundry_project_endpoint=foundry_project_endpoint,
         web_app_name=web_app_name,
+        bing_custom_search=bing_binding,
+        bing_custom_search_resource_id=bing_resource_id,
         **search_values,
     )
 
@@ -523,6 +591,16 @@ def _configure_post_deploy(
         config.model_deployment_name or "",
         owns_credential=True,
     ) as foundry_writer:
+        if resolved.bing_custom_search is not None:
+            tr = InstallerMessages(config.ui_language or DEFAULT_UI_LANGUAGE)
+            print(tr(
+                "Verifying Bing Custom Search resource, site configuration and project connection."
+            ), file=sys.stderr)
+            with AzureArmClient(credential) as arm:
+                verify_bing_custom_search(
+                    arm, resolved.bing_custom_search_resource_id or "",
+                    resolved.bing_custom_search, config.websites,
+                )
         search_index = None
         search_connection = None
         if config.knowledge_mode is KnowledgeMode.SEARCH_BLOB:
@@ -553,6 +631,7 @@ def _configure_post_deploy(
                 allowed_domains=config.websites,
                 search_index_name=search_index,
                 search_connection_name=search_connection,
+                **({"bing_custom_search": resolved.bing_custom_search} if resolved.bing_custom_search else {}),
             )
 
         configure_with_project_access(
@@ -678,6 +757,10 @@ def _add_install_arguments(parser: argparse.ArgumentParser, language: str = "en"
     parser.add_argument("--model-format")
     parser.add_argument("--model-sku")
     parser.add_argument("--model-capacity", type=int)
+    parser.add_argument(
+        "--web-search-provider", choices=[provider.value for provider in WebSearchProvider],
+        help=tr("Web search provider for installation (default: bingCustomSearch)."),
+    )
     parser.add_argument("--deployment-name")
     parser.add_argument("--chatbot-name")
     parser.add_argument(
@@ -756,6 +839,9 @@ def _noninteractive_config(args: argparse.Namespace) -> InstallerConfig:
         strict_websites=args.strict_websites,
         bing_terms_accepted=args.accept_bing_terms,
         foundry_user_role_definition_id=args.foundry_user_role_id,
+        web_search_provider=parse_web_search_provider(
+            args.web_search_provider or WebSearchProvider.BING_CUSTOM_SEARCH.value
+        ),
         storage_blob_data_reader_role_definition_id=args.storage_blob_data_reader_role_id,
         search_index_data_reader_role_definition_id=args.search_index_data_reader_role_id,
     )
@@ -833,6 +919,9 @@ def build_parser(language: str = "en") -> argparse.ArgumentParser:
         child.add_argument("--environment")
         child.add_argument("--location")
         child.add_argument("--ui-language", choices=SUPPORTED_UI_LANGUAGES)
+        child.add_argument(
+            "--web-search-provider", choices=[provider.value for provider in WebSearchProvider],
+        )
         child.add_argument("--websites", help="authorized domains or root HTTPS URLs (always includes subdomains)")
         child.add_argument("--strict-websites", action="store_true",
                            help="compatibility alias; domain restriction is always required")
@@ -888,6 +977,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     prompts,
                     ui_language=args.ui_language,
                     draft=draft,
+                    web_search_provider=(
+                        parse_web_search_provider(args.web_search_provider)
+                        if args.web_search_provider is not None else None
+                    ),
                 )
             if args.dry_run:
                 return _plan(
@@ -964,6 +1057,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             environment_name=args.environment,
             location=args.location,
             ui_language=args.ui_language,
+            web_search_provider=args.web_search_provider,
         )
         if args.websites is not None:
             config = replace(config, websites=validate_websites(args.websites.split(",")))

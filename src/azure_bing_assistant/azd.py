@@ -191,9 +191,15 @@ class AzureCliRunner:
 
 class AppServiceSettingsSynchronizer:
     _STORAGE_SETTING_NAMES = ("STORAGE_ACCOUNT_NAME", "STORAGE_CONTAINER_NAME")
+    _BING_BINDING_SETTING_NAMES = (
+        "BING_CUSTOM_SEARCH_CONNECTION_ID",
+        "BING_CUSTOM_SEARCH_INSTANCE_NAME",
+    )
+    _WEB_SEARCH_SETTING_NAMES = ("WEB_SEARCH_PROVIDER", *_BING_BINDING_SETTING_NAMES)
     _SETTING_NAMES = (
         "CHATBOT_NAME",
         "WEB_GROUNDING_SITES",
+        *_WEB_SEARCH_SETTING_NAMES,
         "KNOWLEDGE_MODE",
         "UI_LANGUAGE",
         *_STORAGE_SETTING_NAMES,
@@ -213,6 +219,7 @@ class AppServiceSettingsSynchronizer:
             name: settings[name]
             for name in self._SETTING_NAMES
             if name not in self._STORAGE_SETTING_NAMES
+            and (name not in self._WEB_SEARCH_SETTING_NAMES or name in settings)
         }
         desired.update({
             name: settings.get(name, "") if desired["KNOWLEDGE_MODE"] == "searchBlob" else ""
@@ -254,8 +261,8 @@ class AppServiceSettingsSynchronizer:
         ):
             raise AzdError("Azure CLI returned unexpected App Service settings")
         current = {row["name"]: row["value"] for row in rows}
-        # Missing and empty storage identities both mean unconfigured in the backend.
-        for name in self._STORAGE_SETTING_NAMES:
+        # Missing and empty optional identities both mean unconfigured in the backend.
+        for name in (*self._STORAGE_SETTING_NAMES, *self._BING_BINDING_SETTING_NAMES):
             current.setdefault(name, "")
         changed = {
             name: value for name, value in desired.items() if current.get(name) != value

@@ -9,8 +9,9 @@ from dataclasses import dataclass
 from typing import Mapping
 from urllib.parse import urlsplit
 
-from azure_bing_assistant.config import validate_websites
+from azure_bing_assistant.config import WebSearchProvider, parse_web_search_provider, validate_websites
 from azure_bing_assistant.agent import SearchDocumentSource
+from azure_bing_assistant.bing_binding import BingCustomSearchBinding
 from azure_bing_assistant.localization import (
     DEFAULT_UI_LANGUAGE,
     SUPPORTED_UI_LANGUAGES,
@@ -119,6 +120,7 @@ class AppSettings:
     agent_timeout_seconds: float = 90.0
     allowed_domains: tuple[str, ...] = ()
     document_source: SearchDocumentSource | None = None
+    bing_custom_search: BingCustomSearchBinding | None = None
 
     def __post_init__(self) -> None:
         if self.environment not in {"development", "test", "production"}:
@@ -127,6 +129,10 @@ class AppSettings:
             raise ValueError("KNOWLEDGE_MODE must be off or searchBlob")
         if not 5 <= self.agent_timeout_seconds <= 300:
             raise ValueError("AGENT_TIMEOUT_SECONDS must be between 5 and 300")
+        if self.bing_custom_search is not None and not isinstance(
+            self.bing_custom_search, BingCustomSearchBinding,
+        ):
+            raise ValueError("bing_custom_search must be a BingCustomSearchBinding")
         if bool(self.foundry_project_endpoint) != bool(self.chatbot_name):
             raise ValueError(
                 "FOUNDRY_PROJECT_ENDPOINT and CHATBOT_NAME must be configured together"
@@ -179,11 +185,26 @@ class AppSettings:
             timeout = float(source.get("AGENT_TIMEOUT_SECONDS", "90"))
         except ValueError as exc:
             raise ValueError("AGENT_TIMEOUT_SECONDS must be a number") from exc
+        bing_connection = source.get("BING_CUSTOM_SEARCH_CONNECTION_ID", "")
+        bing_instance = source.get("BING_CUSTOM_SEARCH_INSTANCE_NAME", "")
+        if bool(bing_connection) != bool(bing_instance):
+            raise ValueError(
+                "BING_CUSTOM_SEARCH_CONNECTION_ID and BING_CUSTOM_SEARCH_INSTANCE_NAME "
+                "must be configured together"
+            )
+        bing_binding = (
+            BingCustomSearchBinding(bing_connection, bing_instance) if bing_connection else None
+        )
+        if "WEB_SEARCH_PROVIDER" in source:
+            provider = parse_web_search_provider(source["WEB_SEARCH_PROVIDER"])
+            if (provider == WebSearchProvider.BING_CUSTOM_SEARCH) != (bing_binding is not None):
+                raise ValueError("WEB_SEARCH_PROVIDER does not match the Bing Custom Search binding")
         return cls(
             environment=source.get("APP_ENV", "development"),
             knowledge_mode=source.get("KNOWLEDGE_MODE", "off"),
             foundry_project_endpoint=source.get("FOUNDRY_PROJECT_ENDPOINT"),
             chatbot_name=source.get("CHATBOT_NAME"),
+            bing_custom_search=bing_binding,
             agent_timeout_seconds=timeout,
             allowed_domains=(
                 validate_websites(source["WEB_GROUNDING_SITES"].split(","))

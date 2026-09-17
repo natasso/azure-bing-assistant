@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
-from urllib.parse import quote, unquote, urlsplit
+from typing import Any, Callable, Mapping, Sequence
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from .azd import redact
 from .azure_cli import AzureCliResolutionError, azure_cli_invocation
-from .config import DEFAULT_UI_LANGUAGE, InstallerConfig
+from .config import DEFAULT_UI_LANGUAGE, InstallerConfig, WebSearchProvider
 from .installer_messages import InstallerMessages
 
 
@@ -42,6 +44,19 @@ _ACCOUNT_ID = re.compile(
     r"(?P<account>[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)", re.IGNORECASE,
 )
 _ATTEMPT_UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+RESUME_MESSAGES = (
+    "Checking the previous Azure deployment before provisioning.",
+    "No previous deployment was found; starting an incremental deployment.",
+    "An Azure deployment is still running; waiting without submitting another deployment.",
+    "The running deployment changed during inspection; no saved outputs were accepted.",
+    "Inspecting existing resources with Azure what-if (no resource changes).",
+    "Azure resource comparison: unchanged {unchanged}, to create {create}, to update {modify}, unresolved {unresolved}.",
+    "Azure could not fully compare existing resources; continuing with incremental reconciliation, not assuming they are complete.",
+    "Infrastructure is already complete and unchanged; reusing confirmed Azure outputs.",
+    "Continuing incremental reconciliation with the saved resource names; no cleanup or automatic recreation.",
+    "Azure proposed resource deletion; provisioning stopped without changing resources.",
+    "Azure resource: {resource_id} ({state}).",
+)
 
 
 def _utc_timestamp(value: object) -> str | None:
@@ -253,6 +268,10 @@ _DEPLOYMENT_OUTPUT_NAMES = (
     "STORAGE_RESOURCE_ID",
     "STORAGE_ACCOUNT_NAME",
     "STORAGE_CONTAINER_NAME",
+    "BING_CUSTOM_SEARCH_RESOURCE_ID",
+    "BING_CUSTOM_SEARCH_CONNECTION_ID",
+    "BING_CUSTOM_SEARCH_INSTANCE_NAME",
+    "WEB_SEARCH_PROVIDER",
 )
 _REQUIRED_DEPLOYMENT_OUTPUT_NAMES = (
     "SERVICE_WEB_NAME",
@@ -287,6 +306,9 @@ def _deployment_parameters(config: InstallerConfig) -> dict[str, dict[str, Any]]
         "createResourceGroup": config.create_resource_group,
         "location": config.location,
         "knowledgeMode": config.knowledge_mode.value,
+        "webSearchProvider": (
+            config.web_search_provider or WebSearchProvider.FILTERED_WEB_SEARCH
+        ).value,
         "cognitiveUserRoleDefinitionId": config.foundry_user_role_definition_id or "",
         "storageBlobDataReaderRoleDefinitionId": (
             config.storage_blob_data_reader_role_definition_id or ""
@@ -476,6 +498,25 @@ class AzureArmClient:
             )
         return status, payload, response.headers
 
+    def read_resource(self, resource_id: str, api_version: str) -> dict[str, Any]:
+        if (
+            not isinstance(resource_id, str)
+            or not re.fullmatch(
+                r"/subscriptions/[A-Za-z0-9-]+/resourceGroups/[A-Za-z0-9_().-]+"
+                r"/providers/[A-Za-z0-9.]+(?:/[A-Za-z0-9_.-]+){2,}",
+                resource_id, re.ASCII | re.IGNORECASE,
+            )
+            or any(part in {".", ".."} for part in resource_id.split("/"))
+            or not re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:-preview)?", api_version)
+        ):
+            raise ValueError("An ARM resource ID and API version are required")
+        _, payload, _ = self._send_json(
+            "GET", "https://management.azure.com" + quote(resource_id, safe="/")
+            + "?api-version=" + api_version,
+            operation="read resource configuration", retry_total=0, request_timeout=30,
+        )
+        return payload
+
     def deploy(
         self,
         subscription_id: str,
@@ -553,6 +594,214 @@ class AzureArmClient:
             url, deadline, payload, headers,
             expected_marker=operation_id if "provisioningOperationId" in request_parameters else None,
         )
+
+    def inspect_existing(
+        self, config: InstallerConfig, template: Mapping[str, Any],
+        parameters: Mapping[str, Any], report: Callable[..., None],
+    ) -> dict[str, Any] | None:
+        report(RESUME_MESSAGES[0])
+        subscription = quote(config.subscription_id or "", safe="")
+        url = (
+            f"https://management.azure.com/subscriptions/{subscription}/providers/"
+            f"Microsoft.Resources/deployments/chatbot-{config.environment_name}"
+            f"?api-version={_ARM_API_VERSION}"
+        )
+        status, current, headers = self._send_json(
+            "GET", url, accepted={200, 404},
+            operation="inspect the previous infrastructure deployment",
+            retry_total=0, request_timeout=60,
+        )
+        if status == 404:
+            report(RESUME_MESSAGES[1])
+            return None
+        properties = current.get("properties")
+        if not isinstance(properties, dict) or not isinstance(
+            properties.get("provisioningState"), str,
+        ):
+            raise ProvisioningError("Azure did not return a valid deployment provisioning state")
+
+        def matches(payload: Mapping[str, Any]) -> bool:
+            props = payload.get("properties")
+            actual = props.get("parameters") if isinstance(props, Mapping) else None
+            return (
+                "provisioningConfigHash" in parameters and isinstance(actual, Mapping)
+                and all(
+                    isinstance(actual.get(key), Mapping)
+                    and type(actual[key].get("value")) is type(value["value"])
+                    and actual[key].get("value") == value["value"]
+                    for key, value in parameters.items()
+                )
+            )
+
+        if properties["provisioningState"] not in _TERMINAL_STATES:
+            report(RESUME_MESSAGES[2])
+            metadata = _attempt_metadata(current)
+            if matches(current) and metadata is not None and metadata[0] is not None:
+                marker = metadata[0]
+                current = self._poll_deployment(
+                    url, time.monotonic() + 1800, current, headers, expected_marker=marker,
+                )
+                if not matches(current) or not self._deployment_matches(current, marker):
+                    raise ProvisioningError(RESUME_MESSAGES[3])
+            else:
+                # A different/legacy attempt must finish before incremental reconciliation.
+                current, _ = self._wait_for_existing_deployment(
+                    url, time.monotonic() + 1800, current, headers,
+                )
+            properties = current["properties"]
+        report(RESUME_MESSAGES[4])
+        try:
+            changes = self._compare_resources(url, config, template, parameters)
+        except ProvisioningError:
+            report(RESUME_MESSAGES[6])
+            report(RESUME_MESSAGES[8])
+            return None
+        counts = {name: 0 for name in ("NoChange", "Create", "Modify", "Delete", "unresolved")}
+        for change in changes:
+            kind = change["changeType"]
+            counts[kind if kind in counts else "unresolved"] += 1
+            report(RESUME_MESSAGES[10], resource_id=change["resourceId"], state=kind)
+        report(
+            RESUME_MESSAGES[5], unchanged=counts["NoChange"], create=counts["Create"],
+            modify=counts["Modify"], unresolved=counts["unresolved"],
+        )
+        if counts["Delete"]:
+            raise ProvisioningError(RESUME_MESSAGES[9])
+        recorded = properties.get("outputResources")
+        compared_ids = {change["resourceId"].casefold() for change in changes}
+        coverage_complete = (
+            isinstance(recorded, list) and 0 < len(recorded) <= 200
+            and all(
+                isinstance(resource, dict) and isinstance(resource.get("id"), str)
+                and resource["id"].casefold() in compared_ids
+                for resource in recorded
+            )
+        )
+        if (
+            changes and coverage_complete and counts["NoChange"] == len(changes)
+            and properties.get("provisioningState") == "Succeeded" and matches(current)
+        ):
+            _, confirmed, _ = self._send_json(
+                "GET", url, operation="confirm the unchanged infrastructure deployment",
+                retry_total=0, request_timeout=60,
+            )
+            confirmed_properties = confirmed.get("properties")
+            if (
+                not isinstance(confirmed_properties, dict)
+                or confirmed_properties.get("provisioningState") != "Succeeded"
+                or not matches(confirmed)
+                or _attempt_metadata(confirmed) is None
+                or _attempt_metadata(confirmed) != _attempt_metadata(current)
+            ):
+                raise ProvisioningError(RESUME_MESSAGES[3])
+            _canonical_deployment_outputs(confirmed)
+            report(RESUME_MESSAGES[7])
+            return confirmed
+        report(RESUME_MESSAGES[8])
+        return None
+
+    def _compare_resources(
+        self, deployment_url: str, config: InstallerConfig,
+        template: Mapping[str, Any], parameters: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        url = deployment_url.replace("?", "/whatIf?", 1)
+        request_parameters = dict(parameters)
+        if "provisioningOperationId" in template.get("parameters", {}):
+            request_parameters["provisioningOperationId"] = {"value": str(uuid.uuid4())}
+        body = {"location": config.location, "properties": {
+            "mode": "Incremental", "template": template, "parameters": request_parameters,
+            "whatIfSettings": {"resultFormat": "FullResourcePayloads"},
+        }}
+        deadline = time.monotonic() + 120
+        status, payload, headers = self._send_json(
+            "POST", url, body=body, accepted={200, 202},
+            operation="compare existing infrastructure", retry_total=0, request_timeout=60,
+        )
+        poll_url = None
+        for _ in range(20):
+            if status == 200 and payload.get("status") == "Succeeded":
+                break
+            if payload.get("status") in {"Failed", "Canceled"} or time.monotonic() >= deadline:
+                raise ProvisioningError("Azure could not complete the resource comparison")
+            location = next(
+                (value for key, value in headers.items() if key.lower() == "location"), None,
+            )
+            if location is not None:
+                if (
+                    not isinstance(location, str) or len(location) > 8192
+                    or not location.isascii() or not location.isprintable()
+                    or location != location.strip()
+                ):
+                    raise ProvisioningError("Azure returned an invalid resource comparison URL")
+                try:
+                    parsed = urlsplit(location)
+                    query = parse_qs(parsed.query, keep_blank_values=True)
+                except ValueError:
+                    raise ProvisioningError("Azure returned an invalid resource comparison URL") from None
+                prefix = f"/subscriptions/{quote(config.subscription_id or '', safe='')}/"
+                operation_path = parsed.path[len(prefix):]
+                if (
+                    parsed.scheme != "https" or parsed.netloc != "management.azure.com"
+                    or not parsed.path.casefold().startswith(prefix.casefold())
+                    or not re.fullmatch(
+                        r"(?:operationresults|providers/Microsoft\.Resources/"
+                        r"(?:locations/[A-Za-z0-9-]+/)?(?:operationresults|operations))/"
+                        r"[A-Za-z0-9._~%+=-]+", operation_path, re.IGNORECASE,
+                    )
+                    or any(part in {".", ".."} for part in unquote(parsed.path).split("/"))
+                    or parsed.fragment
+                    or not {"api-version"} <= set(query) <= {"api-version", "t", "c", "s", "h"}
+                    or any(len(values) != 1 or not values[0] for values in query.values())
+                ):
+                    raise ProvisioningError("Azure returned an invalid resource comparison URL")
+                poll_url = location
+            if poll_url is None:
+                raise ProvisioningError("Azure omitted the resource comparison URL")
+            self._deployment_pause(headers)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ProvisioningError("Azure could not complete the resource comparison")
+            status, payload, headers = self._send_json(
+                "GET", poll_url, accepted={200, 202},
+                operation="wait for the resource comparison", retry_total=0,
+                request_timeout=remaining,
+            )
+        else:
+            raise ProvisioningError("Azure could not complete the resource comparison")
+        properties = payload.get("properties")
+        changes = properties.get("changes") if isinstance(properties, dict) else None
+        if (
+            not isinstance(changes, list) or len(changes) > 200
+            or payload.get("error") or payload.get("diagnostics") or properties.get("diagnostics")
+        ):
+            raise ProvisioningError("Azure returned an incomplete resource comparison")
+        group_id = f"/subscriptions/{config.subscription_id}/resourceGroups/{config.resource_group_name}"
+        seen = set()
+        for index, change in enumerate(changes):
+            if not isinstance(change, dict):
+                raise ProvisioningError("Azure returned an invalid resource comparison")
+            resource_id = change.get("resourceId")
+            kind = change.get("changeType")
+            if (
+                not isinstance(resource_id, str) or not re.fullmatch(r"/[A-Za-z0-9_()./-]+", resource_id)
+                or not (
+                    resource_id.casefold() == group_id.casefold()
+                    or resource_id.casefold().startswith(group_id.casefold() + "/providers/")
+                )
+                or resource_id.casefold() in seen
+                or kind not in {"NoChange", "Create", "Modify", "Delete", "Ignore", "Deploy", "Unsupported"}
+            ):
+                raise ProvisioningError("Azure returned an invalid resource comparison")
+            seen.add(resource_id.casefold())
+            before = change.get("before")
+            if kind == "NoChange":
+                before_properties = before.get("properties", {}) if isinstance(before, dict) else None
+                if (
+                    not isinstance(before_properties, dict)
+                    or before_properties.get("provisioningState", "Succeeded") != "Succeeded"
+                ):
+                    changes[index] = dict(change, changeType="Unsupported")
+        return changes
 
     @staticmethod
     def _deployment_matches(payload: Mapping[str, Any], operation_id: str) -> bool:
@@ -775,12 +1024,38 @@ class AzureProvisioner:
             template = self._compile_template(
                 config, self.cwd / "infra" / "main.bicep"
             )
-            result = arm.deploy(
-                config.subscription_id or "",
-                f"chatbot-{config.environment_name}",
-                config.location,
-                template,
-                _deployment_parameters(config),
-            )
+            parameters = _deployment_parameters(config)
+            if "provisioningConfigHash" in template.get("parameters", {}):
+                parameters["provisioningConfigHash"] = {"value": hashlib.sha256(
+                    json.dumps(
+                        {"template": template, "parameters": parameters},
+                        sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                    ).encode("utf-8")
+                ).hexdigest()}
+            tr = InstallerMessages(config.ui_language or DEFAULT_UI_LANGUAGE)
+
+            def report(message: str, **values: object) -> None:
+                print(tr(message, **values), file=sys.stderr)
+
+            result = arm.inspect_existing(config, template, parameters, report)
+            if result is None:
+                result = arm.deploy(
+                    config.subscription_id or "",
+                    f"chatbot-{config.environment_name}",
+                    config.location,
+                    template,
+                    parameters,
+                )
             outputs = _canonical_deployment_outputs(result)
+            if config.web_search_provider is WebSearchProvider.BING_CUSTOM_SEARCH:
+                missing = [
+                    name for name in (
+                        "BING_CUSTOM_SEARCH_RESOURCE_ID", "BING_CUSTOM_SEARCH_CONNECTION_ID",
+                        "BING_CUSTOM_SEARCH_INSTANCE_NAME",
+                    ) if not outputs.get(name)
+                ]
+                if missing:
+                    raise ProvisioningError(
+                        "Azure deployment omitted required Bing Custom Search outputs: " + ", ".join(missing)
+                    )
         return outputs

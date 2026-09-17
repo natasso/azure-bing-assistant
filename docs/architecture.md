@@ -12,15 +12,17 @@
 
 [Sorgente Excalidraw del grafo](assets/architecture-it.excalidraw)
 
-**Grafo storico:** mostra ancora risorsa/connessione Bing standalone, ora rimosse
-dal template. Il testo seguente descrive il deployment attuale. Il percorso `off` crea:
+**Grafo storico:** precede la configurazione Custom Search e i controlli sul
+collegamento attuali. Il testo seguente descrive il deployment. Il percorso `off` crea:
 
 - un piano Linux Basic e un App Service HTTPS con Managed Identity
   `SystemAssigned`;
 - un account Microsoft Foundry/AI Services con autenticazione locale
   disabilitata, un progetto con Managed Identity e il deployment del modello
   scelto;
-- role assignment che consente all'identità del web app di usare Foundry.
+- role assignment che consente all'identità del web app di usare Foundry;
+- con il provider predefinito `bingCustomSearch`, una risorsa Bing dedicata,
+  la configurazione dei siti autorizzati e una connessione al progetto Foundry.
 
 `searchBlob` conserva tutti questi componenti e aggiunge Storage Standard LRS,
 container privato `documents`, Azure AI Search Basic, indicizzatore/indice e
@@ -53,7 +55,9 @@ HMAC, chiavi di firma, lease o lock distribuiti.
 3. `DefaultAzureCredential` invia una distribuzione subscription-scope
    incrementale ad Azure Resource Manager tramite HTTPS.
 4. Gli output non segreti confermati vengono salvati nell'ambiente azd.
-5. Il post-deploy crea/verifica la versione dell'agente con `web_search.filters.allowed_domains`,
+5. Il post-deploy verifica la configurazione Custom Search via ARM senza leggere
+   chiavi, poi crea/verifica la versione dell'agente con il collegamento Custom
+   Search e `web_search.filters.allowed_domains`,
    collega Search solo in `searchBlob`, poi azd distribuisce il pacchetto web.
 
 L'identità dell'operatore serve al deployment; la Managed Identity dell'App
@@ -120,8 +124,10 @@ Questa implementazione usa i modelli SDK ufficiali `WebSearchTool` e
 `WebSearchToolFilters(allowed_domains=[...])` in `PromptAgentDefinition.tools`.
 L'SDK installato `azure-ai-projects==2.0.1` crea versioni con **POST**
 `/agents/{name}/versions` (non un PUT ipotizzato). La serializzazione HTTP reale
-è testata offline. Nessuna proprietà inventata, tool preview o fallback senza
-filtro; nessuna connessione/chiave Bing standalone o nuova architettura Search richiesta.
+è testata offline. Non usa fallback senza filtro. Il provider `bingCustomSearch` aggiunge
+`WebSearchConfiguration(project_connection_id, instance_name)`. La chiave Bing
+viene trasferita da ARM alla connessione Foundry, non al pacchetto o al browser.
+Il provider esplicito `filteredWebSearch` conserva il percorso senza risorsa Bing.
 I filtri includono sottodomini, non percorsi; non inferiscono equivalenza www/apice.
 
 Responses richiede `include=["web_search_call.action.sources"]`; il backend
@@ -150,13 +156,16 @@ di conformità o residenza.
 
 ### Riferimenti Microsoft
 
-Riferimenti controllati indipendentemente il 25 agosto 2026:
+Riferimenti sul filtro nativo controllati il 25 agosto 2026; riferimenti
+Custom Search aggiunti il 17 settembre 2026:
 
 - [Web grounding overview](https://learn.microsoft.com/azure/foundry/agents/how-to/tools/web-overview)
 - [Azure Responses domain filtering and consulted sources](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/web-search#domain-filtering)
 - [Foundry v1 OpenAPI](https://github.com/Azure/azure-rest-api-specs/blob/main/specification/ai-foundry/data-plane/Foundry/openapi3/v1/microsoft-foundry-openapi3.json)
 - [Grounding with Bing tools](https://learn.microsoft.com/azure/foundry/agents/how-to/tools/bing-tools)
 - [Web Search and domain-restricted Custom Search](https://learn.microsoft.com/azure/foundry/agents/how-to/tools/web-search)
+- [Microsoft Marketplace Custom Search account template](https://catalogartifact.azureedge.net/publicartifacts/Microsoft.BingGroundingCustomSearch-1.0.2/DeploymentTemplates/CreateResource.json)
+- [Microsoft portal Custom Search configuration source map (260202-0025)](https://hosting.portal.azure.net/bingapi/Content/260202-0025/Scripts/ReactViews/CustomConfigInstances/CustomConfigInstancesDetailsPage.ReactView.js.map)
 - [Foundry toolbox supported-tools matrix](https://learn.microsoft.com/azure/foundry/agents/concepts/toolbox-overview#supported-tools)
 - [Create an Azure AI Search Web Knowledge Source](https://learn.microsoft.com/azure/search/agentic-knowledge-source-how-to-web)
 - [Azure AI Search Web Knowledge Source REST contract](https://learn.microsoft.com/rest/api/searchservice/knowledge-sources/create-or-update?view=rest-searchservice-2026-04-01)
@@ -174,15 +183,17 @@ Riferimenti controllati indipendentemente il 25 agosto 2026:
 
 [Excalidraw source for the graph](assets/architecture-en.excalidraw)
 
-**Historical graph:** it still shows the standalone Bing resource/connection,
-now removed from the template. The following text describes the current deployment.
+**Historical graph:** it predates the current Custom Search configuration and
+binding checks. The following text describes the current deployment.
 The `off` path creates:
 
 - a Linux Basic plan and HTTPS App Service with `SystemAssigned` Managed
   Identity;
 - a Microsoft Foundry/AI Services account with local authentication disabled,
   a project with Managed Identity, and the selected model deployment;
-- a role assignment allowing the web app identity to use Foundry.
+- a role assignment allowing the web app identity to use Foundry;
+- with the default `bingCustomSearch` provider, a dedicated Bing resource,
+  authorized-site configuration, and Foundry project connection.
 
 `searchBlob` keeps all those components and adds Standard LRS Storage, a private
 `documents` container, Basic Azure AI Search, index/indexer, and a Search project
@@ -214,7 +225,9 @@ signing key, lease, or distributed lock.
 3. `DefaultAzureCredential` sends an incremental subscription-scope deployment
    to Azure Resource Manager over HTTPS.
 4. Confirmed non-secret outputs are stored in the azd environment.
-5. Post-deploy creates/verifies the agent version with `web_search.filters.allowed_domains`, attaches
+5. Post-deploy verifies the Custom Search configuration through ARM without
+   reading keys, then creates/verifies the agent version with its Custom Search
+   binding and `web_search.filters.allowed_domains`, attaches
    Search only in `searchBlob`, and then azd deploys the web package.
 
 Operator identity is used for deployment; App Service Managed Identity is used
@@ -277,8 +290,11 @@ This implementation uses official SDK `WebSearchTool` and
 `WebSearchToolFilters(allowed_domains=[...])` in `PromptAgentDefinition.tools`.
 Installed `azure-ai-projects==2.0.1` creates versions with **POST**
 `/agents/{name}/versions`, not an assumed PUT. The actual SDK HTTP serialization
-is tested offline. There are no invented fields, preview tools, unfiltered
-fallbacks, standalone Bing keys/connections, or required new Search architecture.
+is tested offline. There is no unfiltered fallback. The `bingCustomSearch`
+provider adds `WebSearchConfiguration(project_connection_id, instance_name)`.
+ARM transfers the Bing key directly into the Foundry connection, not the app
+package or browser. Explicit `filteredWebSearch` retains the path without a
+standalone Bing resource.
 Domains include subdomains, not paths, without inferring www/apex equivalence.
 
 Responses requests `include=["web_search_call.action.sources"]`. Runtime validates
@@ -306,13 +322,16 @@ residency guarantee is provided.
 
 ### Microsoft references
 
-References independently checked on August 25, 2026:
+Native-filter references checked on August 25, 2026; Custom Search references
+added on September 17, 2026:
 
 - [Web grounding overview](https://learn.microsoft.com/azure/foundry/agents/how-to/tools/web-overview)
 - [Azure Responses domain filtering and consulted sources](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/web-search#domain-filtering)
 - [Foundry v1 OpenAPI](https://github.com/Azure/azure-rest-api-specs/blob/main/specification/ai-foundry/data-plane/Foundry/openapi3/v1/microsoft-foundry-openapi3.json)
 - [Grounding with Bing tools](https://learn.microsoft.com/azure/foundry/agents/how-to/tools/bing-tools)
 - [Web Search and domain-restricted Custom Search](https://learn.microsoft.com/azure/foundry/agents/how-to/tools/web-search)
+- [Microsoft Marketplace Custom Search account template](https://catalogartifact.azureedge.net/publicartifacts/Microsoft.BingGroundingCustomSearch-1.0.2/DeploymentTemplates/CreateResource.json)
+- [Microsoft portal Custom Search configuration source map (260202-0025)](https://hosting.portal.azure.net/bingapi/Content/260202-0025/Scripts/ReactViews/CustomConfigInstances/CustomConfigInstancesDetailsPage.ReactView.js.map)
 - [Foundry toolbox supported-tools matrix](https://learn.microsoft.com/azure/foundry/agents/concepts/toolbox-overview#supported-tools)
 - [Create an Azure AI Search Web Knowledge Source](https://learn.microsoft.com/azure/search/agentic-knowledge-source-how-to-web)
 - [Azure AI Search Web Knowledge Source REST contract](https://learn.microsoft.com/rest/api/searchservice/knowledge-sources/create-or-update?view=rest-searchservice-2026-04-01)

@@ -93,6 +93,7 @@ def create_app(
             allowed_domains=current.allowed_domains,
             search_enabled=current.knowledge_mode == "searchBlob",
             document_source=current.document_source,
+            bing_custom_search=current.bing_custom_search,
         )
     else:
         adapter = UnconfiguredAgent()
@@ -142,6 +143,9 @@ def create_app(
             "suggestedQuestions": ui.suggested_questions,
             "knowledgeMode": current.knowledge_mode,
             "allowedDomains": list(current.allowed_domains),
+            "webSearchProvider": (
+                "bingCustomSearch" if current.bing_custom_search else "filteredWebSearch"
+            ),
             "websiteEnforcement": "allowed_domains" if current.allowed_domains else None,
             "includesSubdomains": True,
         })

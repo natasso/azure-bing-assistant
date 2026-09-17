@@ -4,6 +4,7 @@ from azure_bing_assistant.config import (
     ConfigurationError,
     InstallerConfig,
     KnowledgeMode,
+    WebSearchProvider,
     validate_azure_name,
     validate_identifier,
     validate_model_capacity,
@@ -45,6 +46,28 @@ def test_optional_resource_group_config_semantics_are_unchanged():
 @pytest.mark.parametrize("mode", ["off", "searchBlob"])
 def test_supported_modes(mode):
     assert InstallerConfig.from_values(mode, environ={}).knowledge_mode.value == mode
+
+
+@pytest.mark.parametrize("provider", list(WebSearchProvider))
+def test_web_search_provider_round_trips_through_saved_configuration(provider):
+    config = InstallerConfig.from_values("off", environ={"WEB_SEARCH_PROVIDER": provider.value})
+    assert config.web_search_provider is provider
+    assert config.public_parameters()["webSearchProvider"] == provider.value
+    assert config.azd_environment_values()["WEB_SEARCH_PROVIDER"] == provider.value
+    saved = {key: value for key, value in config.azd_environment_values().items() if value}
+    assert InstallerConfig.from_values("off", environ=saved).web_search_provider is provider
+
+
+def test_missing_provider_keeps_legacy_configuration_compatible():
+    config = InstallerConfig.from_values("off", environ={})
+    assert config.web_search_provider is None
+    assert config.azd_environment_values()["WEB_SEARCH_PROVIDER"] == "filteredWebSearch"
+
+
+@pytest.mark.parametrize("provider", ["", "web", "BingCustomSearch", " bingCustomSearch", False])
+def test_invalid_provider_does_not_fall_back_to_another_search_mode(provider):
+    with pytest.raises(ConfigurationError, match="WEB_SEARCH_PROVIDER"):
+        InstallerConfig.from_values("off", environ={"WEB_SEARCH_PROVIDER": provider})
 
 
 @pytest.mark.parametrize("mode", ["", "search", "OFF", "crawler", "nfs"])

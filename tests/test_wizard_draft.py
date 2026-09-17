@@ -10,7 +10,7 @@ from unittest.mock import Mock
 import pytest
 
 from azure_bing_assistant import cli, wizard_draft
-from azure_bing_assistant.config import ConfigurationError, InstallerConfig
+from azure_bing_assistant.config import ConfigurationError, InstallerConfig, WebSearchProvider
 from azure_bing_assistant.wizard import (
     CapabilityError, ConsolePrompts, DiscoveryError, ModelChoice, RegionChoice,
     SubscriptionChoice, WizardCancelled, collect_websites, run_wizard,
@@ -63,6 +63,26 @@ def seed(project, *, language="en"):
     return draft, config
 
 
+def test_custom_search_default_and_explicit_legacy_choice_survive_restart(tmp_path):
+    draft, config = seed(tmp_path)
+    assert config.web_search_provider is WebSearchProvider.BING_CUSTOM_SEARCH
+    assert draft.get("web_search_provider") == "bingCustomSearch"
+    changed = run_wizard(
+        discovery(), prompts(RESUME_ANSWERS)[0], "en", load(tmp_path),
+        web_search_provider=WebSearchProvider.FILTERED_WEB_SEARCH,
+    )
+    assert changed.web_search_provider is WebSearchProvider.FILTERED_WEB_SEARCH
+    resumed = run_wizard(discovery(), prompts(RESUME_ANSWERS)[0], "en", load(tmp_path))
+    assert resumed.web_search_provider is WebSearchProvider.FILTERED_WEB_SEARCH
+    assert resumed.model_capacity == config.model_capacity
+
+
+def test_invalid_saved_search_provider_is_rejected(tmp_path):
+    draft = load(tmp_path)
+    with pytest.raises(WizardDraftError):
+        draft.update(web_search_provider="unrestricted")
+
+
 def test_incremental_valid_answers_survive_cancel_and_two_independent_wizards(tmp_path):
     first = load(tmp_path)
     p, _, _ = prompts(FIRST_ANSWERS[:5] + ["Invalid Chatbot", "helper", EOFError()])
@@ -100,6 +120,7 @@ def test_failure_after_answers_keeps_draft_without_consent_or_service_outputs(tm
         "language", "tenant_id", "subscription_id", "resource_group", "create_group",
         "location", "model", "capacity", "chatbot_name", "environment_name",
         "deployment_name", "use_search", "domains", "domain_more",
+        "web_search_provider",
     }
     assert "role-one" not in stored.path.read_text()
 

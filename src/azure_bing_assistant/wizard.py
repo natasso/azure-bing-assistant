@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Protocol, Sequence
 from urllib.parse import quote
 
@@ -14,6 +14,8 @@ from .config import (
     ConfigurationError,
     InstallerConfig,
     KnowledgeMode,
+    WebSearchProvider,
+    parse_web_search_provider,
     validate_azure_name,
     validate_identifier,
     validate_model_capacity,
@@ -25,6 +27,7 @@ from .installer_messages import InstallerMessageError, InstallerMessages
 from .localization import (
     DEFAULT_UI_LANGUAGE, LANGUAGE_LABELS, NO_WORDS, SUPPORTED_UI_LANGUAGES, YES_WORDS,
 )
+from .model_quota import ModelQuota, QuotaUnavailable, metadata_text, read_model_quota
 from .wizard_draft import WizardDraft
 
 
@@ -62,6 +65,7 @@ class ModelChoice:
     minimum_capacity: int | None = None
     maximum_capacity: int | None = None
     default_capacity: int | None = None
+    usage_name: str | None = None
 
     def __post_init__(self) -> None:
         for field in ("minimum_capacity", "maximum_capacity", "default_capacity"):
@@ -101,7 +105,64 @@ class Discovery(Protocol):
 
     def models(self, subscription_id: str, location: str) -> list[ModelChoice]: ...
 
+    def quota(self, subscription_id: str, location: str, model: ModelChoice) -> ModelQuota: ...
+
     def role_definition(self, subscription_id: str, accepted_names: Sequence[str]) -> str: ...
+
+
+def _quota_guidance(
+    discovery: Discovery, subscription_id: str, location: str,
+    model: ModelChoice, prompts: ConsolePrompts,
+) -> None:
+    tr = prompts.messages
+    reason = tr("Azure did not provide an unambiguous SKU usageName")
+    quota = None
+    lookup = getattr(discovery, "quota", None)
+    if metadata_text(model.usage_name) is not None and callable(lookup):
+        prompts.output(tr("Checking live Azure quota for the selected model/SKU..."))
+        try:
+            quota = lookup(subscription_id, location, model)
+        except DiscoveryError:
+            reason = tr("Azure quota could not be read (permissions, connectivity, or unsupported API)")
+        except QuotaUnavailable:
+            reason = tr("Azure returned missing, ambiguous, or malformed quota data")
+        else:
+            if not isinstance(quota, ModelQuota):
+                reason = tr("Azure returned missing, ambiguous, or malformed quota data")
+    elif metadata_text(model.usage_name) is not None:
+        reason = tr("Azure quota could not be read (permissions, connectivity, or unsupported API)")
+    if not isinstance(quota, ModelQuota):
+        prompts.output(tr(
+            "Quota unavailable: {reason}. No availability is assumed; SKU limits/defaults "
+            "are not subscription quota.", reason=reason,
+        ))
+        return
+    prompts.output(tr(
+        "Live Azure quota at {timestamp} (subscription {subscription}, region {region}, model {model}):",
+        timestamp=quota.checked_at.isoformat(timespec="seconds"),
+        subscription=subscription_id, region=location, model=model.label,
+    ))
+    prompts.output(tr(
+        "Quota pool: {usage_name}; limit: {limit}; current usage: {current}; remaining: "
+        "{remaining}; Azure unit: {unit}.",
+        usage_name=quota.usage_name, limit=format(quota.limit, "f"),
+        current=format(quota.current, "f"), remaining=format(quota.remaining, "f"), unit=quota.unit,
+    ))
+    if quota.period is not None or quota.status is not None:
+        prompts.output(tr(
+            "Azure quota period: {period}; status: {status}.",
+            period=quota.period or tr("Unknown"), status=quota.status or tr("Unknown"),
+        ))
+    prompts.output(tr(
+        "Arithmetic snapshot only, not a deployment guarantee; quota is shared with other "
+        "deployments. Existing deployments already consume quota, so remaining is not a "
+        "limit on a saved deployment's total capacity. Azure rechecks on deployment."
+    ))
+    prompts.output(tr(
+        "The API unit is shown verbatim; no conversion to deployment capacity, TPM or RPM "
+        "is inferred. SKU defaults and workload examples are not available quota. "
+        "No capacity is changed automatically; saved valid capacity is preserved."
+    ))
 
 
 def _capacity_guidance(
@@ -266,6 +327,10 @@ class AzureCliDiscovery:
             ]
         )
         choices: list[ModelChoice] = []
+        if not isinstance(rows, list):
+            raise DiscoveryError(
+                "Azure returned no deployable model/SKU combinations for this region"
+            )
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -276,16 +341,16 @@ class AzureCliDiscovery:
             if nested_model is not None and not isinstance(nested_model, dict):
                 continue
             model = nested_model or row
-            name = model.get("name")
-            version = model.get("version")
-            model_format = model.get("format") or row.get("kind")
+            name = metadata_text(model.get("name"))
+            version = metadata_text(model.get("version"))
+            model_format = metadata_text(model.get("format") or row.get("kind"))
             skus = model.get("skus") if "skus" in model else row.get("skus")
             if not isinstance(skus, list):
                 continue
             for sku in skus:
                 if not isinstance(sku, dict):
                     continue
-                sku_name = sku.get("name")
+                sku_name = metadata_text(sku.get("name"))
                 if name and version and model_format and sku_name:
                     capacity = sku.get("capacity")
                     if capacity is None:
@@ -303,13 +368,29 @@ class AzureCliDiscovery:
                             capacity.get("minimum"),
                             capacity.get("maximum"),
                             capacity.get("default"),
+                            metadata_text(sku.get("usageName")),
                         )
                     )
         if not choices:
             raise DiscoveryError(
                 "Azure returned no deployable model/SKU combinations for this region"
             )
-        return sorted(choices, key=lambda item: item.label.casefold())
+        usage_names: dict[tuple[str, str, str, str], set[str | None]] = {}
+        for item in choices:
+            identity = (item.name, item.version, item.model_format, item.sku)
+            usage_names.setdefault(identity, set()).add(item.usage_name)
+        choices = [
+            replace(item, usage_name=None)
+            if len(usage_names[(item.name, item.version, item.model_format, item.sku)]) != 1
+            else item
+            for item in choices
+        ]
+        return sorted(dict.fromkeys(choices), key=lambda item: item.label.casefold())
+
+    def quota(self, subscription_id: str, location: str, model: ModelChoice) -> ModelQuota:
+        if model.usage_name is None:
+            raise QuotaUnavailable()
+        return read_model_quota(self._json, subscription_id, location, model.usage_name)
 
     def role_definition(
         self, subscription_id: str, accepted_names: Sequence[str]
@@ -572,6 +653,7 @@ def run_wizard(
     prompts: ConsolePrompts,
     ui_language: str | None = None,
     draft: WizardDraft | None = None,
+    web_search_provider: WebSearchProvider | None = None,
 ) -> InstallerConfig:
     prior_language = (
         draft.get("language", DEFAULT_UI_LANGUAGE) if draft is not None else DEFAULT_UI_LANGUAGE
@@ -598,10 +680,20 @@ def run_wizard(
         ]
     )
     prompts.messages = InstallerMessages(language)
+    provider = web_search_provider or parse_web_search_provider(
+        draft.get("web_search_provider", WebSearchProvider.BING_CUSTOM_SEARCH.value)
+        if draft is not None else WebSearchProvider.BING_CUSTOM_SEARCH.value
+    )
     if draft is not None:
-        draft.update(language=language)
+        draft.update(language=language, web_search_provider=provider.value)
+    prompts.output(prompts.messages(
+        "Web grounding: Bing Custom Search with a dedicated resource, domain configuration "
+        "and project connection. Bing usage charges apply."
+        if provider is WebSearchProvider.BING_CUSTOM_SEARCH else
+        "Web grounding: filtered web search without a Bing Custom Search connection."
+    ))
     try:
-        return _run_wizard(discovery, prompts, language, draft)
+        return _run_wizard(discovery, prompts, language, draft, provider)
     except (ConfigurationError, DiscoveryError) as exc:
         raise type(exc)(exc.render(language)) from exc
 
@@ -609,6 +701,7 @@ def run_wizard(
 def _run_wizard(
     discovery: Discovery, prompts: ConsolePrompts, language: str,
     draft: WizardDraft | None = None,
+    web_search_provider: WebSearchProvider = WebSearchProvider.BING_CUSTOM_SEARCH,
 ) -> InstallerConfig:
     tr = prompts.messages
 
@@ -711,6 +804,7 @@ def _run_wizard(
         ("capacity",),
         model={"name": model.name, "version": model.version, "format": model.model_format, "sku": model.sku},
     )
+    _quota_guidance(discovery, subscription.subscription_id, region.name, model, prompts)
     default_capacity = model.default_capacity
     if default_capacity is None:
         default_capacity = InstallerConfig.model_capacity
@@ -842,4 +936,5 @@ def _run_wizard(
         foundry_user_role_definition_id=foundry_role_id,
         storage_blob_data_reader_role_definition_id=storage_role_id,
         search_index_data_reader_role_definition_id=search_role_id,
+        web_search_provider=web_search_provider,
     )

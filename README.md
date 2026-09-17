@@ -20,7 +20,7 @@
 
 Help students, applicants, and staff navigate public university information
 with a web chatbot in your Azure environment. **Azure Bing Assistant** pairs
-domain-filtered, Bing-backed native `web_search` with a compatible model you
+Grounding with Bing Custom Search through native `web_search` with a compatible model you
 choose in Microsoft Foundry:
 start from the web without first building a document index.
 
@@ -68,7 +68,8 @@ authoritative university pages: those pages, not chat answers, govern deadlines.
 ### Indicative monthly estimate
 
 **About USD 149.13/month for 1,000 conversations of five question-answer turns.**
-This estimate uses the assumptions documented in the guide; actual cost depends
+This historical estimate is not a verified Bing Custom Search quote. Recheck the
+selected provider's current meters and prices. It uses the assumptions documented in the guide; actual cost depends
 on usage. It includes the $13.14 B1 fixed cost; optional Search, taxes, and other
 items are excluded.
 [See the estimate's assumptions and details](docs/configuration.md#indicative-monthly-estimate-en).
@@ -86,9 +87,8 @@ items are excluded.
 
 ![Azure Bing Assistant architecture in English](docs/assets/architecture-en.svg)
 
-**Earlier illustrations:** screenshots and graphs still show old labels and the
-standalone Bing resource/connection. Current code uses filtered `web_search`
-without that resource; see the [updated architecture](docs/architecture.md).
+**Earlier illustrations:** screenshots and graphs predate the current Custom
+Search configuration and binding checks; see the [updated architecture](docs/architecture.md).
 
 More Italian-default views: [document mode (illustrative local
 demonstration)](docs/assets/chat-search-desktop.png) ·
@@ -141,7 +141,7 @@ existing live deployment has been upgraded or verified in all nine languages.
 
 | Experience | Technical value | Resources |
 |---|---|---|
-| **Authorized websites (default)** | `off` | Foundry, model, Bing web-search consumption, App Service |
+| **Authorized websites (default)** | `off` | Foundry, model, Bing Custom Search resource/configuration/connection, App Service |
 | **Authorized websites + managed documents** | `searchBlob` | Everything above, plus Blob Storage and Azure AI Search |
 
 `off` means only **document search off**: Bing and chat remain enabled.
@@ -186,6 +186,19 @@ it is not chat conversation storage. Non-interactive installations still require
 explicit flags and do not read or save this draft. Answers from older attempts
 cannot be recovered unless a draft already existed. Changing the installation
 name can create parallel billable resources rather than replace the previous ones.
+
+Model selection also displays live subscription/region quota where Azure exposes
+an exact model/SKU usage identifier: limit, current usage, remaining amount and
+provider units, separate from the SKU maximum/default. Unavailable quota is
+explicitly unknown, not zero; valid saved capacity is preserved.
+
+On restart, infrastructure provisioning reads the previous ARM deployment and
+compares existing resources using Azure what-if. It waits for active deployments,
+reports resources to create/update or already unchanged, and reuses confirmed
+outputs only for an identical successful deployment with a complete no-change
+comparison. Otherwise it reconciles incrementally with the same saved names.
+There is no cleanup; uncertain comparisons do not count as completed work.
+Application configuration and packaging still run.
 
 After final approval, `install` shows five real phases on **stderr**, for example
 `Phase 2/5 · Provisioning Azure resources · in progress · 01:15`.
@@ -380,8 +393,8 @@ and organizational policy. See [Security](docs/security.md#english) and
 
 Aiuta studenti, candidati e personale a orientarsi tra informazioni pubbliche,
 servizi e contatti con un chatbot web nel tuo ambiente Azure.
-**Azure Bing Assistant** unisce ricerca nativa `web_search` filtrata per dominio
-(basata su Bing) a un modello compatibile in Microsoft Foundry:
+**Azure Bing Assistant** unisce Grounding with Bing Custom Search tramite
+`web_search` nativo a un modello compatibile in Microsoft Foundry:
 puoi partire dal web senza costruire prima un indice documentale.
 
 Pensato per **università di qualsiasi paese con portali pubblici che cambiano
@@ -429,7 +442,9 @@ ufficiali dell'università, non le risposte della chat.
 ### Stima mensile indicativa
 
 **Circa 149,13 USD/mese per 1.000 conversazioni da cinque scambi domanda-risposta.**
-Importo stimato in base alle ipotesi riportate nella guida; il costo effettivo
+Questa stima storica non è un preventivo verificato per Bing Custom Search:
+riconfermare meter e prezzi del provider scelto. Importo stimato in base alle
+ipotesi riportate nella guida; il costo effettivo
 dipende dall'uso. Include il fisso B1 di $13,14; Search opzionale, imposte e altre
 voci sono esclusi.
 [Consulta ipotesi e dettagli della stima](docs/configuration.md#stima-mensile-indicativa-it).
@@ -447,9 +462,9 @@ voci sono esclusi.
 
 ![Architettura Azure Bing Assistant in italiano](docs/assets/architecture-it.svg)
 
-**Illustrazioni precedenti:** screenshot e grafi mostrano ancora le vecchie etichette
-e la risorsa/connessione Bing standalone. Il codice attuale usa `web_search` filtrato
-senza tale risorsa; vedere [architettura aggiornata](docs/architecture.md).
+**Illustrazioni precedenti:** screenshot e grafi precedono la configurazione
+Custom Search e i controlli sul collegamento attuali; vedere
+[architettura aggiornata](docs/architecture.md).
 
 Altre viste: [modalità documenti (dimostrazione locale
 illustrativa)](docs/assets/chat-search-desktop.png) ·
@@ -485,7 +500,7 @@ stata aggiornata o verificata in tutte le nove lingue.
 
 | Esperienza | Valore tecnico | Risorse |
 |---|---|---|
-| **Siti autorizzati (predefinita)** | `off` | Foundry, modello, consumo web search Bing, App Service |
+| **Siti autorizzati (predefinita)** | `off` | Foundry, modello, risorsa/configurazione/connessione Bing Custom Search, App Service |
 | **Siti autorizzati + documenti gestiti** | `searchBlob` | Tutto quanto sopra, più Blob Storage e Azure AI Search |
 
 `off` significa soltanto **ricerca documentale disattivata**: Bing e la chat
@@ -531,6 +546,19 @@ non è memoria delle conversazioni. Le installazioni non interattive richiedono
 argomenti espliciti e non leggono né salvano la bozza. Le risposte di vecchi
 tentativi non sono recuperabili se non esisteva già una bozza. Cambiare nome
 all'installazione può creare risorse parallele a pagamento, non sostituire le precedenti.
+
+La scelta del modello mostra anche la quota effettiva della sottoscrizione/regione
+quando Azure espone un identificatore di utilizzo esatto per modello/SKU: limite,
+utilizzo, residuo e unità del provider, separati dal massimo/predefinito SKU.
+Una quota non leggibile è sconosciuta, non zero; la capacità salvata valida resta invariata.
+
+Alla ripresa, il provisioning legge il deployment ARM precedente e confronta le
+risorse con Azure what-if. Attende i deployment attivi, mostra le risorse da
+creare/aggiornare o già invariate e riusa gli output confermati solo per un
+deployment identico, riuscito e con confronto completo senza modifiche.
+Negli altri casi riconcilia in modalità incrementale usando gli stessi nomi
+salvati. Nessuna pulizia; un confronto incerto non equivale a lavoro completato.
+Configurazione dell'applicazione e distribuzione del pacchetto vengono ancora eseguite.
 
 Dopo il Sì finale, `install` mostra su **stderr** cinque fasi reali con attività
 ed elapsed, ad esempio `Fase 2/5 · Creazione delle risorse Azure · in corso · 01:15`.

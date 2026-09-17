@@ -12,6 +12,7 @@ from ipaddress import ip_address
 from typing import Any, Protocol
 from urllib.parse import unquote, urlsplit
 
+from .bing_binding import BingCustomSearchBinding
 from .config import validate_websites
 from .localization import load_catalog
 
@@ -50,6 +51,25 @@ class InvalidPreviousResponse(RuntimeError):
 
 class SourcePolicyError(RuntimeError):
     """The configured tool or returned evidence cannot establish the source policy."""
+
+
+@dataclass(frozen=True)
+class VerifiedAgentContext:
+    """Caller-attested immutable agent version whose Bing binding was verified."""
+
+    agent_name: str
+    version: str
+    bing_custom_search: BingCustomSearchBinding
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.agent_name, str) or not self.agent_name
+            or any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in self.agent_name)
+            or not isinstance(self.version, str)
+            or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", self.version)
+            or not isinstance(self.bing_custom_search, BingCustomSearchBinding)
+        ):
+            raise ValueError("A verified agent name, immutable version, and Bing binding are required")
 
 
 @dataclass(frozen=True)
@@ -95,10 +115,25 @@ def _search_index_identity(tools: list[dict[str, Any]]) -> tuple[str, str]:
         raise SourcePolicyError("Document search index metadata is unavailable") from exc
 
 
-def validate_tool_policy(
-    tools: Any, allowed_domains: tuple[str, ...], search_enabled: bool
-) -> None:
-    """Reject stale, unfiltered, extra, or unsupported tools; never downgrade."""
+def _bing_binding_from_tool(tool: dict[str, Any]) -> BingCustomSearchBinding | None:
+    configuration = tool.get("custom_search_configuration")
+    if configuration is None:
+        return None
+    if not isinstance(configuration, dict) or set(configuration) != {
+        "project_connection_id", "instance_name",
+    }:
+        raise SourcePolicyError("Malformed Bing Custom Search configuration")
+    try:
+        return BingCustomSearchBinding(
+            configuration["project_connection_id"], configuration["instance_name"],
+        )
+    except (TypeError, ValueError) as exc:
+        raise SourcePolicyError("Malformed Bing Custom Search configuration") from exc
+
+
+def _validate_tool_sources(
+    tools: Any, allowed_domains: tuple[str, ...], search_enabled: bool,
+) -> dict[str, Any]:
     if not isinstance(tools, list) or len(tools) != (2 if search_enabled else 1):
         raise SourcePolicyError("Reconfigure the agent with filtered web_search and retry a new chat")
     web_tools = [tool for tool in tools if isinstance(tool, dict) and tool.get("type") == "web_search"]
@@ -108,10 +143,53 @@ def validate_tool_policy(
     filters = web_tools[0].get("filters")
     if not isinstance(filters, dict) or filters.get("allowed_domains") != list(allowed_domains):
         raise SourcePolicyError("The agent allowed domains do not match application configuration")
-    if web_tools[0].get("custom_search_configuration") is not None:
-        raise SourcePolicyError("Unexpected web search connection configuration")
     if search_enabled:
         _search_index_identity(tools)
+    return web_tools[0]
+
+
+def _validate_web_binding(
+    web_tool: dict[str, Any], bing_custom_search: BingCustomSearchBinding | None,
+) -> None:
+    actual_binding = _bing_binding_from_tool(web_tool)
+    if bing_custom_search is None and actual_binding is not None:
+        raise SourcePolicyError("Unexpected web search connection configuration")
+    if bing_custom_search is not None and (
+        actual_binding is None or actual_binding.identity != bing_custom_search.identity
+    ):
+        raise SourcePolicyError("Bing Custom Search does not match application configuration")
+
+
+def validate_tool_policy(
+    tools: Any, allowed_domains: tuple[str, ...], search_enabled: bool,
+    *,
+    bing_custom_search: BingCustomSearchBinding | None = None,
+) -> None:
+    """Reject stale, unfiltered, extra, or unsupported tools; never downgrade."""
+    web_tool = _validate_tool_sources(tools, allowed_domains, search_enabled)
+    _validate_web_binding(web_tool, bing_custom_search)
+
+
+def _validate_response_agent_references(
+    payload: dict[str, Any], output: list[Any], verified_agent: VerifiedAgentContext,
+) -> None:
+    expected = {
+        "type": "agent_reference",
+        "name": verified_agent.agent_name,
+        "version": verified_agent.version,
+    }
+    if "agent_reference" in payload and payload["agent_reference"] != expected:
+        raise SourcePolicyError("Response does not match the verified agent version")
+    if not output or any(
+        not isinstance(item, dict) or item.get("agent_reference") != expected for item in output
+    ):
+        raise SourcePolicyError("Response output does not establish the verified agent version")
+    for item in output:
+        if "response_id" in item and (
+            not isinstance(payload.get("id"), str) or not payload["id"]
+            or item["response_id"] != payload["id"]
+        ):
+            raise SourcePolicyError("Response output belongs to a different response")
 
 
 def _source_host(value: Any) -> str:
@@ -149,6 +227,8 @@ def validate_response_evidence(
     *,
     document_source: SearchDocumentSource | None = None,
     document_urls: set[str] | None = None,
+    bing_custom_search: BingCustomSearchBinding | None = None,
+    verified_agent: VerifiedAgentContext | None = None,
 ) -> tuple[list[str], bool]:
     try:
         # Azure-specific output items are preserved as OpenAI model extras.
@@ -158,10 +238,26 @@ def validate_response_evidence(
         raise SourcePolicyError("Response enforcement metadata is unavailable") from exc
     if not isinstance(payload, dict):
         raise SourcePolicyError("Response enforcement metadata is unavailable")
-    validate_tool_policy(payload.get("tools"), allowed_domains, search_enabled)
     output = payload.get("output")
     if not isinstance(output, list) or payload.get("status") != "completed":
         raise SourcePolicyError("Incomplete response enforcement metadata")
+    web_tool = _validate_tool_sources(payload.get("tools"), allowed_domains, search_enabled)
+    projected_binding = bing_custom_search is not None and "custom_search_configuration" not in web_tool
+    if verified_agent is not None:
+        if (
+            not isinstance(verified_agent, VerifiedAgentContext)
+            or bing_custom_search is None
+            or verified_agent.bing_custom_search.identity != bing_custom_search.identity
+        ):
+            raise SourcePolicyError("Verified agent context does not match the expected Bing binding")
+        if projected_binding or "agent_reference" in payload or any(
+            isinstance(item, dict) and "agent_reference" in item for item in output
+        ):
+            _validate_response_agent_references(payload, output, verified_agent)
+    # Foundry may omit this field from response.tools. Only the verified immutable
+    # definition plus service attribution of every output item can replace that echo.
+    if not (projected_binding and verified_agent is not None):
+        _validate_web_binding(web_tool, bing_custom_search)
     sources: list[str] = []
     web_used = False
     web_citations: list[str] = []
@@ -468,6 +564,8 @@ class AgentToolOrchestrator:
         allowed_domains: tuple[str, ...],
         search_index_name: str | None = None,
         search_connection_name: str | None = None,
+        *,
+        bing_custom_search: BingCustomSearchBinding | None = None,
     ) -> None:
         domains = validate_websites(allowed_domains)
         if bool(search_index_name) != bool(search_connection_name):
@@ -478,6 +576,8 @@ class AgentToolOrchestrator:
                 "filters": {"allowed_domains": list(domains)},
             }
         ]
+        if bing_custom_search is not None:
+            tools[0]["custom_search_configuration"] = bing_custom_search.as_dict()
         if search_index_name and search_connection_name:
             tools.append(
                 {
@@ -648,17 +748,69 @@ class FoundrySdkWriter:
                 AzureAISearchToolResource,
                 WebSearchTool,
                 WebSearchToolFilters,
+                WebSearchConfiguration,
                 PromptAgentDefinition,
             )
         except ImportError as exc:
             raise SourcePolicyError("Installed SDK does not support filtered WebSearchTool") from exc
 
+        if (
+            not isinstance(tools, list)
+            or any(
+                not isinstance(tool, dict)
+                or tool.get("type") not in {"web_search", "azure_ai_search"}
+                for tool in tools
+            )
+        ):
+            raise ValueError("Unsupported Foundry tool type")
+        web_tools = [tool for tool in tools if tool["type"] == "web_search"]
+        search_enabled = any(tool["type"] == "azure_ai_search" for tool in tools)
+        if len(web_tools) != 1 or len(tools) != (2 if search_enabled else 1):
+            raise SourcePolicyError("Exactly one filtered web_search and at most one document tool are required")
+        domains = validate_websites(web_tools[0].get("filters", {}).get("allowed_domains", []))
+        bing_custom_search = _bing_binding_from_tool(web_tools[0])
         sdk_tools: list[Any] = []
         for tool in tools:
             if tool["type"] == "web_search":
-                domains = validate_websites(tool.get("filters", {}).get("allowed_domains", []))
+                configuration = None
+                if bing_custom_search is not None:
+                    try:
+                        connection = self.project.connections.get(
+                            bing_custom_search.connection_name,
+                            include_credentials=False,
+                            **request_options(),
+                        )
+                    except AzureError as exc:
+                        raise SourcePolicyError(
+                            "Foundry could not resolve the Bing Custom Search connection; "
+                            "the source restrictions were not relaxed."
+                        ) from exc
+                    try:
+                        resolved_binding = BingCustomSearchBinding(
+                            connection.id, bing_custom_search.instance_name,
+                        )
+                        # Connection.type is the public SDK category field (an open string enum).
+                        if (
+                            resolved_binding.identity != bing_custom_search.identity
+                            or connection.name.casefold() != bing_custom_search.connection_name.casefold()
+                            or connection.type != "GroundingWithCustomSearch"
+                            or not isinstance(connection.target, str)
+                            or connection.target.lower() not in {
+                                "https://api.bing.microsoft.com", "https://api.bing.microsoft.com/",
+                            }
+                        ):
+                            raise SourcePolicyError("Bing Custom Search connection metadata does not match")
+                    except (AttributeError, TypeError, ValueError) as exc:
+                        raise SourcePolicyError("Bing Custom Search connection metadata is unavailable") from exc
+                    configuration = WebSearchConfiguration(
+                        project_connection_id=connection.id,
+                        instance_name=bing_custom_search.instance_name,
+                    )
                 sdk_tools.append(
-                    WebSearchTool(filters=WebSearchToolFilters(allowed_domains=list(domains)))
+                    WebSearchTool(
+                        filters=WebSearchToolFilters(allowed_domains=list(domains)),
+                        **({"custom_search_configuration": configuration} if configuration is not None else {}),
+                    )
                 )
             elif tool["type"] == "azure_ai_search":
                 try:
@@ -682,12 +834,10 @@ class FoundrySdkWriter:
                 )
             else:
                 raise ValueError("Unsupported Foundry tool type")
-        web_tools = [tool for tool in tools if tool["type"] == "web_search"]
-        if len(web_tools) != 1:
-            raise SourcePolicyError("Exactly one filtered web_search tool is required")
-        domains = validate_websites(web_tools[0].get("filters", {}).get("allowed_domains", []))
-        search_enabled = any(tool["type"] == "azure_ai_search" for tool in tools)
-        validate_tool_policy([tool.as_dict() for tool in sdk_tools], domains, search_enabled)
+        validate_tool_policy(
+            [tool.as_dict() for tool in sdk_tools], domains, search_enabled,
+            bing_custom_search=bing_custom_search,
+        )
         try:
             result = self.project.agents.create_version(
                 agent_name=agent_name,
@@ -732,7 +882,10 @@ class FoundrySdkWriter:
         try:
             if result.name != agent_name or result.definition.kind != "prompt":
                 raise SourcePolicyError("Foundry returned an unexpected agent definition")
-            validate_tool_policy(result.definition.as_dict().get("tools"), domains, search_enabled)
+            validate_tool_policy(
+                result.definition.as_dict().get("tools"), domains, search_enabled,
+                bing_custom_search=bing_custom_search,
+            )
         except (AttributeError, TypeError, ValueError) as exc:
             raise SourcePolicyError("Foundry omitted the configured agent definition") from exc
         return "created"
@@ -752,6 +905,7 @@ class FoundryAgentAdapter:
         allowed_domains: tuple[str, ...],
         search_enabled: bool = False,
         document_source: SearchDocumentSource | None = None,
+        bing_custom_search: BingCustomSearchBinding | None = None,
         project_client: Any | None = None,
     ) -> None:
         parsed = urlsplit(endpoint)
@@ -781,6 +935,7 @@ class FoundryAgentAdapter:
         self.allowed_domains = validate_websites(allowed_domains)
         self.search_enabled = search_enabled
         self.document_source = document_source
+        self.bing_custom_search = bing_custom_search
         self._project_client = project_client
         self._owns_credential = False
 
@@ -820,7 +975,10 @@ class FoundryAgentAdapter:
                 raise SourcePolicyError("Unexpected agent version metadata")
         except (AttributeError, TypeError, ValueError) as exc:
             raise SourcePolicyError("Agent version metadata is unavailable") from exc
-        validate_tool_policy(definition.get("tools"), self.allowed_domains, self.search_enabled)
+        validate_tool_policy(
+            definition.get("tools"), self.allowed_domains, self.search_enabled,
+            bing_custom_search=self.bing_custom_search,
+        )
         search_identity = _search_index_identity(definition["tools"]) if self.search_enabled else None
         return version, search_identity
 
@@ -849,6 +1007,10 @@ class FoundryAgentAdapter:
             async with asyncio.timeout(self.timeout_seconds):
                 client = self._client()
                 version, search_identity = await self._verified_version()
+                verified_agent = (
+                    VerifiedAgentContext(self.agent_name, version, self.bing_custom_search)
+                    if self.bing_custom_search is not None else None
+                )
                 kwargs["extra_body"]["agent_reference"]["version"] = version
                 response = await client.responses.create(**kwargs)
         except TimeoutError as exc:
@@ -872,6 +1034,8 @@ class FoundryAgentAdapter:
         sources, web_used = validate_response_evidence(
             response, self.allowed_domains, self.search_enabled,
             document_source=self.document_source, document_urls=document_urls,
+            bing_custom_search=self.bing_custom_search,
+            verified_agent=verified_agent,
         )
         if self.search_enabled and _search_index_identity(response.model_dump(warnings=False)["tools"]) != search_identity:
             raise SourcePolicyError("Response document search does not match the pinned agent")

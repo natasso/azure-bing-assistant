@@ -218,12 +218,16 @@ def test_unconfigured_timeout_and_configured_adapter_paths(monkeypatch):
     captured = {}
 
     class RuntimeAgent(FakeAgent):
-        def __init__(self, endpoint, agent_name, timeout_seconds, allowed_domains, search_enabled, document_source):
+        def __init__(
+            self, endpoint, agent_name, timeout_seconds, allowed_domains, search_enabled,
+            document_source, bing_custom_search=None,
+        ):
             super().__init__()
             captured.update(endpoint=endpoint, agent_name=agent_name, timeout=timeout_seconds)
             assert allowed_domains == ("example.org",)
             assert search_enabled is False
             assert document_source is None
+            assert bing_custom_search is None
 
     monkeypatch.setattr(backend_main, "FoundryAgentAdapter", RuntimeAgent)
     settings = AppSettings(
@@ -414,6 +418,7 @@ def test_api_all_languages_use_frontend_catalog_defaults_without_contract_change
         "suggestedQuestions": strings["suggestions"],
         "knowledgeMode": "off",
         "allowedDomains": ["example.org"],
+        "webSearchProvider": "filteredWebSearch",
         "websiteEnforcement": "allowed_domains",
         "includesSubdomains": True,
     }

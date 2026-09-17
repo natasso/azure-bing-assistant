@@ -29,9 +29,9 @@ def test_storage_disables_public_blob_and_shared_key():
 def test_bing_grounding_and_model_are_required_in_both_modes():
     main = Path("infra/main.bicep").read_text(encoding="utf-8")
     foundry = Path("infra/modules/foundry.bicep").read_text(encoding="utf-8")
-    assert "module bing" not in main
+    assert "module bing 'modules/bing.bicep' = if (webSearchProvider == 'bingCustomSearch')" in main
     assert "BING_CONNECTION_NAME" not in main
-    assert not Path("infra/modules/bing.bicep").exists()
+    assert Path("infra/modules/bing.bicep").is_file()
     assert "@allowed([\n  true\n])\n#disable-next-line no-unused-params\nparam bingTermsAccepted bool" in main
     assert "accounts/deployments@2025-06-01" in foundry
     assert "accounts/projects@2025-06-01'" in foundry
@@ -39,8 +39,7 @@ def test_bing_grounding_and_model_are_required_in_both_modes():
     assert "identity: {\n    type: 'SystemAssigned'\n  }" in foundry
 
 
-@pytest.fixture(scope="module", params=("foundry", "main"))
-def compiled_foundry_template(request):
+def _compile_bicep(source):
     compiler = shutil.which("bicep")
     if compiler is None:
         azure_config = Path(os.environ.get("AZURE_CONFIG_DIR", Path.home() / ".azure"))
@@ -49,8 +48,6 @@ def compiled_foundry_template(request):
             pytest.skip("Local Bicep compiler not installed; no download or Azure login")
         compiler = str(installed)
 
-    infra = Path(__file__).resolve().parents[1] / "infra"
-    source = infra / "modules" / "foundry.bicep" if request.param == "foundry" else infra / "main.bicep"
     result = subprocess.run(
         [compiler, "build", str(source), "--stdout", "--no-restore"],
         capture_output=True,
@@ -58,15 +55,66 @@ def compiled_foundry_template(request):
         timeout=60,
     )
     assert result.returncode == 0, result.stderr
-    template = json.loads(result.stdout)
+    return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def compiled_main_template():
+    return _compile_bicep(Path(__file__).resolve().parents[1] / "infra" / "main.bicep")
+
+
+@pytest.fixture(scope="module", params=("foundry", "main"))
+def compiled_foundry_template(request):
     if request.param == "main":
+        template = request.getfixturevalue("compiled_main_template")
         foundry = next(
             resource for resource in template["resources"]
             if resource["type"] == "Microsoft.Resources/deployments"
             and resource["name"] == "foundry"
         )
-        template = foundry["properties"]["template"]
-    return template
+        return foundry["properties"]["template"]
+    return _compile_bicep(Path(__file__).resolve().parents[1] / "infra" / "modules" / "foundry.bicep")
+
+
+def test_compiled_custom_search_has_conditional_resources_and_keyless_outputs(compiled_main_template):
+    modules = {
+        resource["name"]: resource for resource in compiled_main_template["resources"]
+        if resource["type"] == "Microsoft.Resources/deployments"
+    }
+    bing = modules["bing-custom-search"]
+    connection = modules["bing-custom-search-connection"]
+    for module in (bing, connection):
+        assert module["condition"] == "[equals(parameters('webSearchProvider'), 'bingCustomSearch')]"
+        assert "knowledgeMode" not in module["condition"]
+    account, configuration = bing["properties"]["template"]["resources"]
+    assert account["kind"] == "Bing.GroundingCustomSearch"
+    assert account["sku"] == {"name": "G2"}
+    assert account["location"] == "global"
+    assert configuration["apiVersion"] == "2025-05-01-preview"
+    policy = configuration["properties"]
+    assert policy["blockedDomains"] == [] and policy["pinnedDomains"] == []
+    assert policy["copy"][0]["input"] == {
+        "domain": "[format('https://{0}', parameters('allowedDomains')[copyIndex('allowedDomains')])]",
+        "includeSubPages": True, "boostLevel": "Default",
+    }
+    connection_resource, = connection["properties"]["template"]["resources"]
+    settings = connection_resource["properties"]
+    assert settings["category"] == "GroundingWithCustomSearch"
+    assert settings["authType"] == "ApiKey"
+    assert settings["credentials"]["key"] == (
+        "[listKeys(resourceId('Microsoft.Bing/accounts', parameters('bingAccountName')), '2020-06-10').key1]"
+    )
+    for template in (
+        compiled_main_template, bing["properties"]["template"], connection["properties"]["template"],
+    ):
+        assert "listKeys" not in json.dumps(template["outputs"])
+        assert "credentials" not in json.dumps(template["outputs"])
+    for name in ("RESOURCE_ID", "CONNECTION_ID", "INSTANCE_NAME"):
+        assert "bingCustomSearch" in compiled_main_template["outputs"]["BING_CUSTOM_SEARCH_" + name]["value"]
+    web = modules["webapp"]
+    assert "bing-custom-search" not in json.dumps(web.get("dependsOn"))
+    assert "bingCustomSearchConnectionId" in web["properties"]["parameters"]
+    assert "bingCustomSearchInstanceName" in web["properties"]["parameters"]
 
 
 def test_compiled_foundry_serializes_account_child_writes(compiled_foundry_template):

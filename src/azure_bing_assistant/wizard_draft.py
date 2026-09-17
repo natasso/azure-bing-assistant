@@ -13,6 +13,7 @@ from pathlib import Path
 from .config import (
     ConfigurationError, validate_azure_name, validate_identifier,
     validate_resource_group, validate_ui_language, validate_websites,
+    parse_web_search_provider,
 )
 from .installer_messages import InstallerMessageError
 
@@ -29,6 +30,7 @@ _FIELDS = {
     "language", "tenant_id", "subscription_id", "resource_group", "create_group",
     "location", "model", "capacity", "chatbot_name", "environment_name",
     "deployment_name", "use_search", "domains", "domain_more",
+    "web_search_provider",
 }
 
 
@@ -66,6 +68,8 @@ def _validate(answers: object) -> None:
             require(type(value) is str and 1 <= len(value) <= 128)
             if name == "language":
                 validate_ui_language(value)
+            elif name == "web_search_provider":
+                parse_web_search_provider(value)
             elif name in {"tenant_id", "subscription_id"}:
                 require(re.fullmatch(r"[A-Za-z0-9-]+", value) is not None)
             elif name == "location":

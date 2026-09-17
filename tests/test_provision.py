@@ -197,6 +197,9 @@ def test_provision_compiles_then_uses_single_arm_deployment(monkeypatch):
             self.calls.append(args)
             return deployment_result()
 
+        def inspect_existing(self, *args):
+            return None
+
     arm = FakeArm()
     monkeypatch.setattr("azure_bing_assistant.provision.AzureArmClient", lambda: arm)
     monkeypatch.setattr(

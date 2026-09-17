@@ -613,6 +613,39 @@ Installazione non riuscita (Inserimento dati e individuazione delle risorse): Po
 
 <a id="capacita-e-avanzamento-it"></a>
 
+**Quota alla scelta del modello:** il wizard legge l'utilizzo della sottoscrizione
+nella regione selezionata e lo associa al modello/SKU tramite l'esatto `usageName`
+restituito da Azure. Mostra limite, utilizzo corrente, residuo e unità del provider;
+non usa il massimo dello SKU come se fosse quota disponibile e non presume una
+conversione universale in TPM. Quote non leggibili o non associabili sono indicate
+come non disponibili, mai come zero. La lettura è un'istantanea, non una prenotazione
+di capacità: Azure resta autorevole al deployment. La capacità di un modello già
+distribuito è inclusa nell'utilizzo; un residuo basso non rende automaticamente
+errata la capacità salvata e non la riduce.
+
+**Ripresa del provisioning:** dopo l'approvazione, `install` e `provision` leggono
+il deployment ARM della stessa sottoscrizione/installazione. Un tentativo ancora
+attivo viene atteso prima di inviare altro; per quello identico si riprende
+l'attesa verificando l'identificatore dell'operazione. Azure what-if confronta
+l'infrastruttura richiesta con quella presente, senza modificare le risorse,
+mostrando identificatori e stati `NoChange`, `Create`, `Modify` o non risolti.
+Gli output vengono riusati senza un nuovo provisioning soltanto se il deployment
+è riuscito, configurazione e template coincidono tramite `provisioningConfigHash`,
+il confronto non vuoto è interamente `NoChange`, copre tutte le risorse registrate
+in `outputResources` e una nuova lettura conferma
+lo stesso tentativo. Un deployment legacy senza fingerprint viene riconciliato
+incrementalmente; il nuovo fingerprint viene registrato nel deployment Azure.
+Risorse mancanti/modificate o confronti incompleti richiedono riconciliazione
+incrementale con i nomi salvati, non cancellazione e ricreazione indiscriminata.
+Le espressioni ARM non risolte e i valori predefiniti del provider possono produrre
+`Modify`/`Ignore` anche per risorse esistenti: in questi casi non si presume che
+l'infrastruttura sia invariata e il provisioning non viene saltato.
+Un errore di lettura del deployment ferma la procedura; un confronto what-if
+non disponibile produce un avviso esplicito e non autorizza a saltare il provisioning.
+Una proposta di eliminazione ferma la procedura. Il controllo non estende i permessi
+e non cambia le regole di recupero per account soft-deleted. Non salta la configurazione
+Foundry, la sincronizzazione delle impostazioni o la distribuzione del pacchetto app.
+
 La **capacità del modello** propone un valore tra parentesi quadre: premere
 **Invio** per mantenerlo o inserire un altro intero positivo. Il wizard usa il
 valore predefinito restituito da Azure; se manca, propone **10**, adattato agli
@@ -767,10 +800,62 @@ Un vecchio agente Bing non filtrato viene rifiutato dal nuovo runtime.
 Avviare **Nuova chat** dopo ogni modifica alla policy: la cronologia remota di un
 vecchio `previousResponseId` non viene ripulita retroattivamente.
 
-Il tool è `{"type":"web_search","filters":{"allowed_domains":["example.org"]}}`,
-accanto a Search solo se configurato. Nessuna connessione Bing, chiave o risorsa
-standalone è necessaria. Il reprovisioning **incrementale non elimina** vecchie
-risorse/connessioni Bing del cliente: valutarle separatamente senza cleanup automatico.
+Il provider legacy `filteredWebSearch` usa
+`{"type":"web_search","filters":{"allowed_domains":["example.org"]}}` senza
+connessione Bing. Il provider predefinito `bingCustomSearch` aggiunge il
+collegamento descritto sotto. Search documentale resta opzionale e indipendente.
+Il reprovisioning **incrementale non elimina** vecchie risorse/connessioni Bing
+del cliente: valutarle separatamente senza cleanup automatico.
+
+### Provider Bing Custom Search
+
+Le nuove installazioni usano `--web-search-provider bingCustomSearch`: risorsa
+`Microsoft.Bing/accounts` di tipo `Bing.GroundingCustomSearch`, configurazione
+dei siti autorizzati e connessione ApiKey nel progetto Foundry. Non è soltanto
+un filtro applicato alla ricerca web generale. Lo strumento SDK resta
+`web_search`, con `custom_search_configuration` contenente
+`project_connection_id` e `instance_name`, oltre ai filtri dominio.
+
+L'account usa API `2020-06-10`, la configurazione nativa
+`2025-05-01-preview` e la connessione `2026-05-01`. La categoria di connessione
+verificata via ARM e SDK è `GroundingWithCustomSearch`. Il salvataggio segue
+il PUT del portale Microsoft e una rilettura GET completa, senza inventare
+un'azione separata di pubblicazione o garantire tempi di propagazione.
+
+Gli output non segreti sono `BING_CUSTOM_SEARCH_RESOURCE_ID`,
+`BING_CUSTOM_SEARCH_CONNECTION_ID` e `BING_CUSTOM_SEARCH_INSTANCE_NAME`.
+Il nome configurazione è esatto e sensibile alle maiuscole, non un ID numerico
+del servizio Bing Custom Search precedente. La chiave viene passata da ARM
+direttamente alla connessione Foundry: non copiarla nel browser, in variabili
+App Service, argomenti CLI, ambiente azd o Git.
+
+Prima di aggiornare l'agente, l'installer legge via ARM risorsa, configurazione
+e connessione senza credenziali. ID/scope diversi, allowlist vuota o differente,
+pin imprevisti e risposte non verificabili bloccano il deploy. Non converte
+automaticamente errori Custom Search in ricerca generale. Il runtime controlla
+l'esatto collegamento e la policy della versione agente e delle fonti restituite;
+non riceve Contributor su Bing e non gestisce le chiavi.
+
+La risposta Foundry può omettere il collegamento Custom Search dalla proiezione
+`response.tools`. In questo caso il runtime non inventa il campo: richiede il
+contesto della versione immutabile già verificata e lo stesso `agent_reference`
+su ogni elemento dell'output non vuoto. Riferimenti assenti o diversi, ID risposta
+incoerenti e collegamenti espliciti errati bloccano la risposta. I filtri e i
+controlli sulle fonti restano obbligatori.
+
+Un `deploy` su una vecchia installazione senza provider persistito conserva
+`filteredWebSearch`. Per migrare, rieseguire `install --web-search-provider
+bingCustomSearch` con lo stesso ambiente e i valori salvati, rivedendo piano,
+termini e costi: `deploy` da solo non crea risorsa/configurazione/connessione
+mancanti. Per scegliere esplicitamente il percorso precedente usare
+`--web-search-provider filteredWebSearch`; il deploy azzera la coppia di binding
+nel runtime, senza cancellare risorse Azure.
+
+La copertura di sottodomini DNS non si deduce dal campo Custom Search
+`includeSubPages`. Verificare separatamente copertura, supporto del modello e
+coesistenza di configurazione Custom Search e filtri nel servizio scelto.
+La policy delle fonti continua a rifiutare evidenza esterna; non garantisce
+indicizzazione completa o assenza di ritardi. Avviare Nuova chat dopo la migrazione.
 
 Prima di aprire il servizio agli utenti, l'operatore deve:
 1. Confermare il supporto di modello/versione/SKU/regione selezionati senza dedurlo
@@ -802,10 +887,11 @@ Questa indicazione usa prezzi pubblici Azure **Consumption in USD**, rilevati il
 **7 settembre 2026**, al netto di imposte. Contratti, sconti e crediti possono
 produrre prezzi diversi. La base confrontabile è:
 
-Il nuovo percorso nativo resta basato su Bing e soggetto ai relativi termini,
-privacy e costi. Le stime e il benchmark storico sotto non sono nuove misure del
-filtro nativo: riconfermare i meter/prezzi applicabili, senza dedurre uno SKU G1
-o una risorsa standalone dalla tabella storica.
+Entrambi i provider restano soggetti a termini, privacy e costi Bing. Le stime
+e il benchmark storico sotto non sono misure o preventivi verificati del nuovo
+percorso Bing Custom Search. Riconfermare i meter/prezzi applicabili al provider,
+senza trasferire automaticamente le tariffe Grounding with Bing Search alla
+risorsa Custom Search.
 
 - GPT-5.4 versione `2026-03-05`, `DataZoneStandard` pay-as-you-go, richieste
   sotto 272.000 token, in Sweden Central o West Europe: **$2,75/1M token
@@ -1059,6 +1145,9 @@ di risorse.
 | `UI_LANGUAGE` | Lingua completa di UI e installer: `it`, `en`, `fr`, `es`, `pt`, `el`, `he`, `ar`, `tr` | `it` |
 | `WEB_GROUNDING_SITES` | Domini autorizzati separati da virgola (obbligatori, inclusi sottodomini) | nessuno |
 | `BING_TERMS_ACCEPTED` | Accettazione esplicita | `false` |
+| `WEB_SEARCH_PROVIDER` | `bingCustomSearch` o `filteredWebSearch` | `bingCustomSearch` nelle nuove installazioni; compatibilità legacy nei deploy precedenti |
+| `BING_CUSTOM_SEARCH_RESOURCE_ID` | Output ARM della risorsa Bing; solo installer | nessuno |
+| `BING_CUSTOM_SEARCH_CONNECTION_ID`, `BING_CUSTOM_SEARCH_INSTANCE_NAME` | Coppia non segreta che collega il runtime alla configurazione Custom Search | obbligatoria con `bingCustomSearch` |
 | `FOUNDRY_USER_ROLE_DEFINITION_ID` | Input installer: Role ID runtime Foundry completo | nessuno |
 | `STORAGE_BLOB_DATA_READER_ROLE_DEFINITION_ID` | Role ID Blob opzionale | nessuno |
 | `SEARCH_INDEX_DATA_READER_ROLE_DEFINITION_ID` | Role ID Search opzionale | nessuno |
@@ -2203,6 +2292,37 @@ Installation failed (Input and discovery): Unsupported host-only policies: examp
 
 <a id="capacity-and-progress-en"></a>
 
+**Quota during model selection:** the wizard reads subscription usage in the
+selected region and matches the exact model/SKU `usageName` returned by Azure.
+It displays limit, current usage, remaining quota and provider units, never
+substituting the SKU maximum for available quota or assuming a universal TPM
+conversion. Unreadable or unmatched quota is explicitly unavailable, not zero.
+This is a snapshot, not a capacity reservation; Azure remains authoritative at
+deployment. Already deployed model capacity is included in usage, so low remaining
+quota does not automatically invalidate or reduce a valid saved capacity.
+
+**Infrastructure resume:** after approval, `install` and `provision` read the ARM
+deployment for the same subscription/installation. Active attempts are waited for
+before another submission; an identical attempt is resumed with its operation
+identifier verified. Azure what-if compares desired and existing infrastructure
+without changing resources, showing resource IDs and `NoChange`, `Create`,
+`Modify` or unresolved states. Confirmed outputs are reused without provisioning
+only for a successful deployment with matching template/configuration
+`provisioningConfigHash`, a nonempty comparison consisting entirely of `NoChange`
+covering every resource recorded in `outputResources`,
+and a fresh read confirming the same attempt. Legacy deployments without this
+fingerprint are reconciled incrementally; the new fingerprint is recorded in
+the Azure deployment. Missing/changed resources or incomplete comparisons require
+incremental reconciliation with saved names, not wholesale deletion/recreation.
+Unresolved ARM expressions and provider defaults can produce `Modify`/`Ignore`
+even for existing resources; in that case infrastructure is not assumed unchanged
+and provisioning is not skipped.
+An unreadable prior deployment stops the operation; unavailable what-if produces
+an explicit warning and never authorizes skipping provisioning. A proposed
+resource deletion stops provisioning. Inspection does not broaden permissions or
+change soft-deleted-account recovery rules. Foundry configuration, settings
+synchronization and application packaging/deployment still run.
+
 **Model capacity** shows a value in square brackets: press **Enter** to keep it
 or enter another positive integer. The wizard uses Azure's returned default;
 if absent, it proposes **10**, adjusted to any SKU minimum and maximum bounds.
@@ -2352,10 +2472,61 @@ agent and synchronizes settings. Runtime rejects an old unfiltered Bing agent.
 Start **New chat** after every source-policy change: old `previousResponseId`
 history is not retroactively cleaned.
 
-The tool is `{"type":"web_search","filters":{"allowed_domains":["example.org"]}}`,
-alongside Search only when configured. No standalone Bing resource, connection,
-key or `BING_CONNECTION_NAME` output is required. **Incremental reprovisioning
+Legacy `filteredWebSearch` uses
+`{"type":"web_search","filters":{"allowed_domains":["example.org"]}}` without a
+Bing connection. Default `bingCustomSearch` adds the binding described below.
+Document Search remains optional and independent. **Incremental reprovisioning
 does not delete existing customer Bing resources/connections**; review them separately.
+
+### Bing Custom Search provider
+
+New installations use `--web-search-provider bingCustomSearch`: a
+`Microsoft.Bing/accounts` resource of kind `Bing.GroundingCustomSearch`,
+authorized-site configuration, and ApiKey connection in the Foundry project.
+This is not merely a general web-search filter. The SDK tool remains
+`web_search`, with `custom_search_configuration` containing
+`project_connection_id` and `instance_name`, alongside domain filters.
+
+The account uses API `2020-06-10`, the native configuration
+`2025-05-01-preview`, and the connection `2026-05-01`. The connection category
+verified through ARM and the SDK is `GroundingWithCustomSearch`. Saving follows
+the Microsoft portal's PUT and a complete GET readback, without inventing a
+separate publish action or guaranteeing propagation time.
+
+The nonsecret outputs are `BING_CUSTOM_SEARCH_RESOURCE_ID`,
+`BING_CUSTOM_SEARCH_CONNECTION_ID`, and `BING_CUSTOM_SEARCH_INSTANCE_NAME`.
+The configuration name is exact and case-sensitive, not a numeric identifier
+from the earlier Bing Custom Search service. ARM transfers the key directly
+to the Foundry connection: do not copy it into the browser, App Service settings,
+CLI arguments, azd environment, or Git.
+
+Before updating the agent, the installer reads the resource, configuration,
+and credential-free connection through ARM. Mismatched IDs/scopes, an empty or
+different allowlist, unexpected pins, or unverifiable responses block deployment.
+Custom Search errors never trigger general-web fallback. Runtime checks the
+exact binding and the policy of the agent version and returned sources; it
+receives no Bing Contributor role and does not manage keys.
+
+Foundry responses may omit the Custom Search binding from their
+`response.tools` projection. Runtime does not invent that field: it requires
+the already-verified immutable-version context and matching `agent_reference`
+on every item of nonempty output. Missing/different references, inconsistent
+response IDs, or an explicitly incorrect binding block the answer. Domain
+filters and source checks remain mandatory.
+
+A `deploy` against an older installation without a persisted provider retains
+`filteredWebSearch`. To migrate, rerun `install --web-search-provider
+bingCustomSearch` with the same environment and saved choices, reviewing the
+plan, terms, and costs: `deploy` alone does not create missing Bing resources,
+configurations, or connections. Explicit `--web-search-provider filteredWebSearch`
+selects the previous path; deployment clears the runtime binding pair without
+deleting Azure resources.
+
+DNS-subdomain coverage must not be inferred from Custom Search's
+`includeSubPages` field. Independently verify coverage, model support, and
+service acceptance of Custom Search configuration together with filters.
+Source policy still rejects outside evidence; it guarantees neither complete
+indexing nor freshness. Start New chat after migration.
 
 Before exposing the service, the operator must:
 1. Confirm support for the selected model/version/SKU/region; catalog availability
@@ -2385,10 +2556,10 @@ This indication uses public Azure **USD Consumption prices**, retrieved on
 **September 7, 2026**, before tax. Agreements, discounts, and credits can produce
 different prices. Its comparable basis is:
 
-Native filtered search remains Bing-backed and subject to Bing terms, privacy
-and charges. Estimates and the historical benchmark below are not new measurements
-of native filtering: reconfirm applicable meters/pricing without inferring a G1 SKU
-or standalone resource from the historical table.
+Both providers remain subject to Bing terms, privacy, and charges. Estimates
+and the historical benchmark below are not measurements or verified quotes for
+the new Bing Custom Search path. Reconfirm applicable provider meters/pricing;
+do not automatically apply Grounding with Bing Search rates to Custom Search.
 
 - GPT-5.4 version `2026-03-05`, `DataZoneStandard` pay-as-you-go, requests below
   272,000 tokens, in Sweden Central or West Europe: **$2.75/1M input tokens**
@@ -2639,6 +2810,9 @@ changing it can generate a separate set of resources.
 | `UI_LANGUAGE` | Complete UI/installer language: `it`, `en`, `fr`, `es`, `pt`, `el`, `he`, `ar`, `tr` | `it` |
 | `WEB_GROUNDING_SITES` | Required comma-separated authorized domains (includes subdomains) | none |
 | `BING_TERMS_ACCEPTED` | Explicit acknowledgement | `false` |
+| `WEB_SEARCH_PROVIDER` | `bingCustomSearch` or `filteredWebSearch` | `bingCustomSearch` for new installs; legacy compatibility for older deploys |
+| `BING_CUSTOM_SEARCH_RESOURCE_ID` | Bing resource ARM output; installer only | none |
+| `BING_CUSTOM_SEARCH_CONNECTION_ID`, `BING_CUSTOM_SEARCH_INSTANCE_NAME` | Nonsecret pair binding runtime to the Custom Search configuration | required with `bingCustomSearch` |
 | `FOUNDRY_USER_ROLE_DEFINITION_ID` | Installer input: full Foundry runtime role ID | none |
 | `STORAGE_BLOB_DATA_READER_ROLE_DEFINITION_ID` | Optional Blob role ID | none |
 | `SEARCH_INDEX_DATA_READER_ROLE_DEFINITION_ID` | Optional Search role ID | none |

@@ -26,6 +26,8 @@ class RecordingAppSettingsRunner:
             query = command[command.index("--query") + 1]
             assert query == (
                 "[?name=='CHATBOT_NAME' || name=='WEB_GROUNDING_SITES' || "
+                "name=='WEB_SEARCH_PROVIDER' || name=='BING_CUSTOM_SEARCH_CONNECTION_ID' || "
+                "name=='BING_CUSTOM_SEARCH_INSTANCE_NAME' || "
                 "name=='KNOWLEDGE_MODE' || name=='UI_LANGUAGE' || "
                 "name=='STORAGE_ACCOUNT_NAME' || name=='STORAGE_CONTAINER_NAME']."
                 "{name:name,value:value}"
@@ -366,3 +368,111 @@ def test_off_storage_is_optional_absent_is_noop_and_stale_identity_is_cleared(
         assert len(runner.commands) == 1
         assert not any(name.startswith("STORAGE_") for name in runner.settings)
     assert sync.synchronize("subscription", "group", "web", base) is False
+
+
+_BING_CONNECTION_ID = (
+    "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/offline-rg"
+    "/providers/Microsoft.CognitiveServices/accounts/offline/projects/project/connections/bing-custom"
+)
+_BING_SETTINGS = {
+    "WEB_SEARCH_PROVIDER": "bingCustomSearch",
+    "BING_CUSTOM_SEARCH_CONNECTION_ID": _BING_CONNECTION_ID,
+    "BING_CUSTOM_SEARCH_INSTANCE_NAME": "approved-sites",
+}
+_BASE_APP_SETTINGS = {
+    "FOUNDRY_PROJECT_ENDPOINT": "https://offline.services.ai.azure.com/api/projects/project",
+    "CHATBOT_NAME": "helper",
+    "WEB_GROUNDING_SITES": "docs.example.org",
+    "KNOWLEDGE_MODE": "off",
+    "UI_LANGUAGE": "en",
+}
+
+
+@pytest.mark.parametrize("before", [
+    {},
+    _BING_SETTINGS,
+    {**_BING_SETTINGS, "WEB_SEARCH_PROVIDER": "filteredWebSearch"},
+    {**_BING_SETTINGS, "BING_CUSTOM_SEARCH_INSTANCE_NAME": "Approved-sites"},
+    {**_BING_SETTINGS, "BING_CUSTOM_SEARCH_CONNECTION_ID": _BING_CONNECTION_ID.replace("/project/", "/other/")},
+    {"WEB_SEARCH_PROVIDER": "filteredWebSearch", "BING_CUSTOM_SEARCH_CONNECTION_ID": "",
+     "BING_CUSTOM_SEARCH_INSTANCE_NAME": ""},
+])
+def test_bing_settings_roundtrip_compares_full_binding_and_excludes_secrets(before):
+    from app.backend.config import AppSettings
+    from azure_bing_assistant.bing_binding import BingCustomSearchBinding
+
+    unrelated = {
+        "BING_CUSTOM_SEARCH_API_KEY": "synthetic-bing-secret",
+        "API_KEY": "synthetic-unrelated-secret",
+        "UNRELATED_SETTING": "preserved",
+    }
+    runner = RecordingAppSettingsRunner({**_BASE_APP_SETTINGS, **before, **unrelated})
+    sync = AppServiceSettingsSynchronizer(".", runner)
+    desired = {**_BASE_APP_SETTINGS, **_BING_SETTINGS}
+    supplied = {**desired, **{name: "must-not-write" for name in unrelated}}
+
+    expected_updates = {name: value for name, value in _BING_SETTINGS.items() if before.get(name) != value}
+    assert sync.synchronize("subscription", "group", "web", supplied) is bool(expected_updates)
+    assert runner.settings == {**desired, **unrelated}
+    assert len(runner.commands) == (2 if expected_updates else 1)
+    if expected_updates:
+        update = runner.commands[1]
+        assert update[update.index("--settings") + 1:update.index("--output")] == [
+            f"{name}={value}" for name, value in expected_updates.items()
+        ]
+        assert update[update.index("--output") + 1] == "none"
+
+    runtime = AppSettings.from_environment(runner.settings)
+    assert runtime.bing_custom_search == BingCustomSearchBinding(_BING_CONNECTION_ID, "approved-sites")
+    assert runtime.allowed_domains == ("docs.example.org",)
+    assert sync.synchronize("subscription", "group", "web", desired) is False
+    assert runner.commands[-1][4] == "list"
+    for command in runner.commands:
+        serialized = json.dumps(command)
+        assert "must-not-write" not in serialized
+        for name, value in unrelated.items():
+            assert name not in serialized
+            assert value not in serialized
+
+
+@pytest.mark.parametrize("before", [
+    {},
+    _BING_SETTINGS,
+    {"WEB_SEARCH_PROVIDER": "filteredWebSearch"},
+    {"WEB_SEARCH_PROVIDER": "filteredWebSearch", "BING_CUSTOM_SEARCH_CONNECTION_ID": "",
+     "BING_CUSTOM_SEARCH_INSTANCE_NAME": ""},
+])
+def test_explicit_legacy_provider_clears_stale_bing_pair_and_roundtrips(before):
+    from app.backend.config import AppSettings
+
+    legacy = {
+        "WEB_SEARCH_PROVIDER": "filteredWebSearch",
+        "BING_CUSTOM_SEARCH_CONNECTION_ID": "",
+        "BING_CUSTOM_SEARCH_INSTANCE_NAME": "",
+    }
+    runner = RecordingAppSettingsRunner({**_BASE_APP_SETTINGS, **before})
+    sync = AppServiceSettingsSynchronizer(".", runner)
+    desired = {**_BASE_APP_SETTINGS, **legacy}
+    expected_updates = {
+        name: value for name, value in legacy.items()
+        if before.get(name, None if name == "WEB_SEARCH_PROVIDER" else "") != value
+    }
+
+    assert sync.synchronize("subscription", "group", "web", desired) is bool(expected_updates)
+    assert runner.settings == {**_BASE_APP_SETTINGS, **before, **expected_updates}
+    assert AppSettings.from_environment(runner.settings).bing_custom_search is None
+    if expected_updates:
+        update = runner.commands[1]
+        assert update[update.index("--settings") + 1:update.index("--output")] == [
+            f"{name}={value}" for name, value in expected_updates.items()
+        ]
+    assert sync.synchronize("subscription", "group", "web", desired) is False
+
+
+def test_older_synchronizer_callers_do_not_remove_existing_bing_settings():
+    runner = RecordingAppSettingsRunner({**_BASE_APP_SETTINGS, **_BING_SETTINGS})
+    sync = AppServiceSettingsSynchronizer(".", runner)
+
+    assert sync.synchronize("subscription", "group", "web", _BASE_APP_SETTINGS) is False
+    assert runner.settings == {**_BASE_APP_SETTINGS, **_BING_SETTINGS}
+    assert len(runner.commands) == 1
