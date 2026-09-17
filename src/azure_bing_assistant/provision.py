@@ -7,6 +7,7 @@ import re
 import subprocess
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import quote, unquote, urlsplit
@@ -30,9 +31,54 @@ _DEPLOYMENT_ID = re.compile(
 _ERROR_CODE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,79}")
 _QUOTA_NUMBERS = (
     ("Required capacity", r"\brequires? ([0-9]{1,9}) new capacity\b"),
-    ("Current usage", r"\bcurrent usage(?: of)?[ :]+([0-9]{1,9})\b"),
-    ("Current limit", r"\bcurrent limit(?: of)?[ :]+([0-9]{1,9})\b"),
+    ("Available capacity", r"\bcurrent available capacity(?: is)?[ :]+([0-9]{1,9})\b"),
+    ("Current usage", r"\bcurrent (?:quota )?usage(?:(?: of| is))?[ :]+([0-9]{1,9})\b"),
+    ("Current limit", r"\b(?:current (?:quota )?limit|quota limit)(?:(?: of| is))?[ :]+([0-9]{1,9})\b"),
 )
+_ACCOUNT_ID = re.compile(
+    r"/subscriptions/(?P<subscription>[A-Za-z0-9-]{1,64})"
+    r"/resourceGroups/(?P<group>[A-Za-z0-9_().-]{1,90})"
+    r"/providers/Microsoft\.CognitiveServices/accounts/"
+    r"(?P<account>[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)", re.IGNORECASE,
+)
+_ATTEMPT_UUID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+
+
+def _utc_timestamp(value: object) -> str | None:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|[+-]\d{2}:\d{2})", value,
+    ):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(
+            timezone.utc
+        ).isoformat().replace("+00:00", "Z")
+    except (ValueError, OverflowError):
+        return None
+
+
+def _attempt_metadata(payload: Mapping[str, Any]) -> tuple[str | None, str | None, str | None] | None:
+    properties = payload.get("properties")
+    if not isinstance(properties, Mapping):
+        return None
+    parameters = properties.get("parameters", {})
+    if not isinstance(parameters, Mapping):
+        return None
+    marker = parameters.get("provisioningOperationId", {})
+    if not isinstance(marker, Mapping):
+        return None
+    marker_id = marker.get("value")
+    correlation = properties.get("correlationId")
+    timestamp = properties.get("timestamp")
+    for value in (marker_id, correlation):
+        if value is not None and (not isinstance(value, str) or not _ATTEMPT_UUID.fullmatch(value)):
+            return None
+    if timestamp is not None and _utc_timestamp(timestamp) is None:
+        return None
+    if marker_id is None and (correlation is None or timestamp is None):
+        return None
+    # Keep the original timestamp precision for revision comparisons.
+    return marker_id, correlation, timestamp
 
 
 def _deployment_diagnostic(resource_id: str) -> str | None:
@@ -50,32 +96,52 @@ def _deployment_diagnostic(resource_id: str) -> str | None:
 class DeploymentFailedError(ProvisioningError):
     """Bounded safe context from a terminal ARM response, not a root-cause diagnosis."""
 
-    def __init__(self, state: str, url: str, error: object) -> None:
+    def __init__(
+        self, state: str, url: str, error: object, *,
+        timestamp: object = None, additional_errors: Sequence[object] = (),
+        attempt_verified: bool = False, operations_read: bool = False,
+        details_unverified: bool = False,
+    ) -> None:
         self.state = state
+        self.timestamp = _utc_timestamp(timestamp)
+        self.attempt_verified = attempt_verified
+        self.operations_read = operations_read
+        self.details_unverified = details_unverified
+        self.deleted_account_targets: set[str] = set()
+        self._complete = True
         self.codes: list[str] = []
         self.numbers: list[tuple[str, str]] = []
         self.commands: list[str] = []
         current_id = unquote(urlsplit(url).path)
         current = _DEPLOYMENT_ID.fullmatch(current_id)
+        self._deployment = current
         command = _deployment_diagnostic(current_id)
         if command:
             self.commands.append(command)
-        pending = [error]
+        pending = list(reversed([error, *additional_errors[:16]]))
+        if len(additional_errors) > 16:
+            self._complete = False
         visited = 0
         while pending and visited < 16:
             node = pending.pop()
             visited += 1
             if not isinstance(node, Mapping):
+                self._complete = False
                 continue
             code = node.get("code")
             if (
                 isinstance(code, str) and _ERROR_CODE.fullmatch(code)
-                and redact(code) == code and code not in self.codes
+                and redact(code) == code
             ):
-                self.codes.append(code)
+                if code not in self.codes:
+                    self.codes.append(code)
+            else:
+                self._complete = False
             # Only literal numeric quota phrases and deployment IDs survive. Never
             # copy arbitrary provider prose, inner JSON, headers or parameters.
             message = node.get("message")
+            if message is not None and (not isinstance(message, str) or len(message) > 8192):
+                self._complete = False
             message = message[:8192] if isinstance(message, str) else ""
             if code in {"InsufficientQuota", "QuotaExceeded", "SpecialFeatureOrQuotaIdRequired"}:
                 for label, pattern in _QUOTA_NUMBERS:
@@ -97,20 +163,74 @@ class DeploymentFailedError(ProvisioningError):
                     command = _deployment_diagnostic(target)
                     if command and command not in self.commands and len(self.commands) < 5:
                         self.commands.append(command)
+            if code == "FlagMustBeSetForRestore":
+                flag_targets = re.findall(r"""['"](/subscriptions/[^'"]*)['"]""", message)
+                if node.get("target") is not None:
+                    flag_targets.append(node["target"])
+                if not flag_targets:
+                    self._complete = False
+                for candidate in flag_targets:
+                    if not isinstance(candidate, str) or not _ACCOUNT_ID.fullmatch(candidate):
+                        self._complete = False
+                    else:
+                        self.deleted_account_targets.add(candidate.lower())
             details = node.get("details")
             if isinstance(details, list):
+                if len(details) > 16:
+                    self._complete = False
                 pending.extend(reversed(details[:16]))
-            inner = node.get("innererror") or node.get("innerError")
-            if isinstance(inner, Mapping):
-                pending.append(inner)
+            elif details is not None:
+                self._complete = False
+            for name in ("innererror", "innerError"):
+                inner = node.get(name)
+                if isinstance(inner, Mapping):
+                    pending.append(inner)
+                elif inner is not None:
+                    self._complete = False
+            if node.get("additionalInfo"):
+                self._complete = False
+        if pending:
+            self._complete = False
         super().__init__(self.render("en"))
+
+    def can_retry_with_new_foundry_account(self, config: InstallerConfig) -> bool:
+        allowed_codes = {
+            "DeploymentFailed", "InvalidTemplateDeployment", "ResourceDeploymentFailure",
+            "FlagMustBeSetForRestore",
+        }
+        if (
+            self.state != "Failed" or not self.attempt_verified or self.details_unverified
+            or not self._complete or "FlagMustBeSetForRestore" not in self.codes
+            or set(self.codes) - allowed_codes or len(self.deleted_account_targets) != 1
+            or self._deployment is None
+        ):
+            return False
+        account = _ACCOUNT_ID.fullmatch(next(iter(self.deleted_account_targets)))
+        return bool(
+            account
+            and account["subscription"].lower() == (config.subscription_id or "").lower()
+            and account["group"].lower() == (config.resource_group_name or "").lower()
+            and account["account"].lower().startswith(f"ai-{config.environment_name}-")
+            and self._deployment["subscription"].lower() == (config.subscription_id or "").lower()
+            and self._deployment["name"] == f"chatbot-{config.environment_name}"
+            and (
+                self._deployment["group"] is None
+                or self._deployment["group"].lower() == (config.resource_group_name or "").lower()
+            )
+        )
 
     def render(self, language: str) -> str:
         tr = InstallerMessages(language)
         lines = [tr("Azure deployment finished with state {state}", state=self.state)]
+        if self.timestamp:
+            lines.append(tr("Azure deployment timestamp (UTC): {timestamp}", timestamp=self.timestamp))
         if self.codes:
             lines.append(tr("Reported error codes: {codes}", codes=" -> ".join(self.codes)))
         lines.extend(f"{tr(label)}: {value}" for label, value in self.numbers)
+        if self.operations_read:
+            lines.append(tr("Failure details were read automatically from this deployment's Azure operations."))
+        if self.details_unverified:
+            lines.append(tr("Additional failure details could not be verified for this attempt; the original error is preserved."))
         lines.append(tr(
             "This is limited context, not a confirmed root cause. Read the deployment "
             "operation details with these read-only commands; no diagnostic command was executed:"
@@ -429,7 +549,10 @@ class AzureArmClient:
                     "Azure provisioning conflict did not clear before timeout"
                 )
 
-        return self._poll_deployment(url, deadline, payload, headers)
+        return self._poll_deployment(
+            url, deadline, payload, headers,
+            expected_marker=operation_id if "provisioningOperationId" in request_parameters else None,
+        )
 
     @staticmethod
     def _deployment_matches(payload: Mapping[str, Any], operation_id: str) -> bool:
@@ -483,7 +606,15 @@ class AzureArmClient:
         deadline: float,
         payload: dict[str, Any],
         headers: Mapping[str, str],
+        *,
+        expected_marker: str | None = None,
     ) -> dict[str, Any]:
+        initial_properties = payload.get("properties")
+        initial_correlation = (
+            initial_properties.get("correlationId") if isinstance(initial_properties, Mapping) else None
+        )
+        if not isinstance(initial_correlation, str) or not _ATTEMPT_UUID.fullmatch(initial_correlation):
+            initial_correlation = None
         while True:
             properties = payload.get("properties")
             state = (
@@ -493,7 +624,9 @@ class AzureArmClient:
             )
             if state in _TERMINAL_STATES:
                 if state != "Succeeded":
-                    raise DeploymentFailedError(state, url, properties.get("error"))
+                    raise self._deployment_failure(
+                        url, deadline, payload, expected_marker, initial_correlation,
+                    )
                 return payload
             if payload and not isinstance(state, str):
                 raise ProvisioningError(
@@ -509,6 +642,88 @@ class AzureArmClient:
                 url,
                 operation="poll the infrastructure deployment",
             )
+
+    def _deployment_failure(
+        self, url: str, deadline: float, payload: dict[str, Any], expected_marker: str | None,
+        initial_correlation: str | None = None,
+    ) -> DeploymentFailedError:
+        properties = payload["properties"]
+        original = DeploymentFailedError(
+            properties["provisioningState"], url, properties.get("error"),
+            timestamp=properties.get("timestamp"), details_unverified=True,
+        )
+        metadata = _attempt_metadata(payload)
+        parsed = urlsplit(url)
+        budget = min(deadline, time.monotonic() + 30)
+        if (
+            original.state != "Failed" or budget <= time.monotonic() or metadata is None
+            or parsed.scheme != "https" or parsed.netloc != "management.azure.com"
+            or parsed.fragment or parsed.query != f"api-version={_ARM_API_VERSION}"
+            or _DEPLOYMENT_ID.fullmatch(unquote(parsed.path)) is None
+            or (
+                payload.get("id") is not None
+                and (not isinstance(payload["id"], str) or payload["id"].lower() != unquote(parsed.path).lower())
+            )
+            or (
+                expected_marker is not None and metadata[0] != expected_marker
+                and (
+                    metadata[0] is not None or initial_correlation is None
+                    or metadata[1] != initial_correlation
+                )
+            )
+        ):
+            return original
+
+        def read(target: str) -> dict[str, Any]:
+            remaining = budget - time.monotonic()
+            if remaining <= 0:
+                raise ProvisioningError("Diagnostic time budget expired")
+            _, result, _ = self._send_json(
+                "GET", target, operation="read deployment failure diagnostics",
+                request_timeout=remaining, retry_total=0,
+            )
+            if time.monotonic() >= budget:
+                raise ProvisioningError("Diagnostic time budget expired")
+            return result
+
+        try:
+            operations = read(parsed._replace(path=parsed.path + "/operations").geturl())
+            rows = operations.get("value")
+            if not isinstance(rows, list) or len(rows) > 64 or operations.get("nextLink"):
+                return original
+            errors = []
+            for row in rows:
+                details = row.get("properties") if isinstance(row, Mapping) else None
+                if not isinstance(details, Mapping):
+                    return original
+                if details.get("provisioningState") == "Succeeded":
+                    continue
+                if details.get("provisioningState") != "Failed":
+                    return original
+                message = details.get("statusMessage")
+                error = message.get("error") if isinstance(message, Mapping) else None
+                if not isinstance(error, Mapping) or len(errors) >= 16:
+                    return original
+                errors.append(error)
+            current = read(url)
+            current_properties = current.get("properties")
+            if (
+                _attempt_metadata(current) != metadata
+                or not isinstance(current_properties, Mapping)
+                or current_properties.get("provisioningState") != original.state
+                or (
+                    current.get("id") is not None
+                    and (not isinstance(current["id"], str) or current["id"].lower() != unquote(parsed.path).lower())
+                )
+            ):
+                return original
+        except (ProvisioningError, KeyError, TypeError, ValueError):
+            return original
+        enriched = DeploymentFailedError(
+            original.state, url, properties.get("error"), timestamp=properties.get("timestamp"),
+            additional_errors=errors, attempt_verified=True, operations_read=bool(errors),
+        )
+        return enriched if enriched._complete else original
 
 
 class AzureProvisioner:

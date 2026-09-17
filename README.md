@@ -258,11 +258,26 @@ installation, and document setup.
 ### Failed installation: retry or clean restart
 
 On failure or Ctrl+C, the installer prints localized recovery guidance to stderr.
-The report **does not cancel, delete, purge, retry, or execute diagnostics**.
+Printed diagnostic CLI commands are **not executed**. On ARM deployment failure,
+the installer can automatically read current deployment operations and recheck
+the parent within a **30-second read-only diagnostic budget**. Verified failure
+codes, UTC timestamps and recognized quota numbers are shown, not provider prose
+or secrets; unverifiable details leave the original error plus a warning.
 Before provisioning, this attempt created nothing to remove; earlier resources
 may still exist. Prefer keeping `.azure` and the **same installation name**.
 Wait for active/conflicting operations; fix quota or access rather than deleting
-resources. Restore a matching recoverable deleted Foundry account when appropriate.
+resources.
+
+**Default soft-delete recovery:** after the disclosed plan and final approval,
+`install` can save a fresh Foundry naming generation and retry provisioning
+**once**, only for a verified, unambiguous `FlagMustBeSetForRestore` matching this
+subscription/group/installation account. `--auto-new-foundry-account` is on by
+default; use `--no-auto-new-foundry-account` to opt out. This does not apply to
+generic 404s, quota errors or uncertain diagnostics. A second failure stops.
+The old recoverable account is preserved and may still hold quota; nothing is
+automatically deleted, restored or purged. Normal retries reuse the saved
+generation and wizard defaults. See [automatic soft-delete recovery](docs/configuration.md#auto-foundry-recovery-en).
+
 With recognized, confirmed infrastructure outputs and a phase 4/5 failure,
 correct the error, check no deployment remains active, and resume locally:
 
@@ -589,12 +604,28 @@ documenti, è in [Configurazione](docs/configuration.md#italiano).
 ### Installazione fallita: riprovare o ripartire da zero
 
 In caso di errore o Ctrl+C, l'installer stampa su stderr indicazioni localizzate.
-Il report **non annulla, elimina, esegue purge, riprova né esegue diagnostica**.
+I comandi CLI diagnostici mostrati **non vengono eseguiti**. Dopo un errore ARM,
+l'installer può leggere automaticamente le operazioni correnti e ricontrollare
+la distribuzione principale entro un **budget diagnostico di 30 secondi in sola
+lettura**. Mostra codici verificati, timestamp UTC e numeri quota riconosciuti,
+non testo provider o segreti; dettagli non verificabili lasciano errore originale e avviso.
 Prima del provisioning, questo tentativo non ha creato nulla da rimuovere;
 possono esistere risorse precedenti. Preferire lo **stesso nome di installazione**
 e conservare `.azure`. Attendere operazioni attive/in conflitto; correggere quota
-o accesso anziché eliminare risorse. Ripristinare l'account Foundry eliminato
-recuperabile corrispondente, quando appropriato. Con output infrastrutturali
+o accesso anziché eliminare risorse.
+
+**Recupero soft-delete predefinito:** dopo piano esplicito e approvazione finale,
+`install` può salvare una nuova generazione del nome Foundry e riprovare il
+provisioning **una sola volta**, esclusivamente per un `FlagMustBeSetForRestore`
+verificato e non ambiguo relativo all'account di questa sottoscrizione/gruppo/installazione.
+`--auto-new-foundry-account` è attivo di default; `--no-auto-new-foundry-account`
+lo disabilita. Non vale per 404 generici, quota o diagnostica incerta. Un secondo
+errore interrompe l'installazione. L'account recuperabile precedente resta intatto
+e può ancora occupare quota: nessuna eliminazione, ripristino o purge automatico.
+I retry normali riusano generazione salvata e predefiniti del wizard.
+Vedere [recupero automatico soft-delete](docs/configuration.md#recupero-foundry-auto-it).
+
+Con output infrastrutturali
 riconosciuti e confermati ed errore in fase 4/5, correggere l'errore, verificare
 che nessun deployment sia ancora attivo e riprendere localmente:
 

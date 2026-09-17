@@ -110,7 +110,9 @@ def _commands(config: InstallerConfig, action: str) -> list[list[str]]:
     return [*setup, provision, ["azd", "deploy", "web", *common]]
 
 
-def _plan(config: InstallerConfig, new_foundry_account: bool = False) -> int:
+def _plan(
+    config: InstallerConfig, new_foundry_account: bool = False, auto_new_foundry_account: bool = True,
+) -> int:
     validate_websites(config.websites)
     search_configured = config.knowledge_mode is KnowledgeMode.SEARCH_BLOB
     payload = {
@@ -118,12 +120,19 @@ def _plan(config: InstallerConfig, new_foundry_account: bool = False) -> int:
         "dryRun": True,
         "config": config.public_parameters(),
         "foundryAccountNaming": {
+            "automaticDeletedAccountRetry": auto_new_foundry_account,
+            "maxAutomaticRetries": 1 if auto_new_foundry_account else 0,
+            "automaticRetryWarning": (
+                "If a deleted Foundry account blocks this installation, a new name generation will be saved and retried once. "
+                "No existing account is restored, deleted or purged; sufficient quota is still required."
+                if auto_new_foundry_account else None
+            ),
             "newGenerationAfterApproval": new_foundry_account,
             "reuseSavedGenerationByDefault": True,
             "environmentVariable": "FOUNDRY_NAME_SALT",
             "deleteExistingAccounts": False,
             "changesWebAppOrResourceGroupNames": False,
-            "mayRequireAdditionalQuotaAndCost": new_foundry_account,
+            "mayRequireAdditionalQuotaAndCost": new_foundry_account or auto_new_foundry_account,
             "warning": (
                 "A new Foundry account name will be generated after approval and saved for retries. "
                 "Existing Foundry accounts are not deleted; web app and resource group names stay unchanged."
@@ -179,6 +188,7 @@ def _plan(config: InstallerConfig, new_foundry_account: bool = False) -> int:
 
 def _interactive_plan(
     config: InstallerConfig, prompts: ConsolePrompts, new_foundry_account: bool = False,
+    auto_new_foundry_account: bool = True,
 ) -> None:
     validate_websites(config.websites)
     tr = prompts.messages
@@ -210,6 +220,11 @@ def _interactive_plan(
         "deploy the application."
     ))
     prompts.output(tr(ACCESS_MESSAGES[0]))
+    if auto_new_foundry_account:
+        prompts.output(tr(
+            "If a deleted Foundry account blocks this installation, a new name generation will be saved and retried once. "
+            "No existing account is restored, deleted or purged; sufficient quota is still required."
+        ))
     if new_foundry_account:
         prompts.output(tr(
             "A new Foundry account name will be generated after approval and saved for retries. "
@@ -630,6 +645,12 @@ def _add_install_arguments(parser: argparse.ArgumentParser, language: str = "en"
     parser.add_argument("--non-interactive", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--auto-new-foundry-account", action=argparse.BooleanOptionalAction, default=True,
+        help=tr(
+            "Automatically retry once with a fresh Foundry name when Azure confirms a deleted-account naming conflict (enabled by default)."
+        ),
+    )
+    parser.add_argument(
         "--new-foundry-account", action="store_true",
         help=tr(
             "Create a new Foundry account name for a clean installation; preserve the saved name generation for normal retries."
@@ -869,9 +890,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     draft=draft,
                 )
             if args.dry_run:
-                return _plan(config, new_foundry_account=args.new_foundry_account)
+                return _plan(
+                    config, new_foundry_account=args.new_foundry_account,
+                    auto_new_foundry_account=args.auto_new_foundry_account,
+                )
             if prompts is not None:
-                _interactive_plan(config, prompts, new_foundry_account=args.new_foundry_account)
+                _interactive_plan(
+                    config, prompts, new_foundry_account=args.new_foundry_account,
+                    auto_new_foundry_account=args.auto_new_foundry_account,
+                )
                 if not prompts.yes_no(prompts.messages("Proceed with provisioning and deployment"), default=False):
                     prompts.output(prompts.messages("Installation cancelled; Azure state was not changed."))
                     return 1
@@ -897,7 +924,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "Reuse it for retries; changing it again creates another account."
                         ), file=sys.stderr)
             with phase("Provisioning Azure resources"):
-                deployment_values = AzureProvisioner(Path.cwd()).run(config)
+                try:
+                    deployment_values = AzureProvisioner(Path.cwd()).run(config)
+                except DeploymentFailedError as exc:
+                    if not args.auto_new_foundry_account or not exc.can_retry_with_new_foundry_account(config):
+                        raise
+                    print(InstallerMessages(config.ui_language or language)(
+                        "Azure confirmed a deleted Foundry account name. Saving a fresh name generation and "
+                        "retrying infrastructure once; existing accounts remain untouched."
+                    ), file=sys.stderr)
+                    config = replace(config, foundry_name_salt=uuid.uuid4().hex)
+                    deployment_values = {}
+                    _save_deployment_outputs(
+                        runner, config.environment_name, {"FOUNDRY_NAME_SALT": config.foundry_name_salt},
+                    )
+                    deployment_values = AzureProvisioner(Path.cwd()).run(config)
             with phase("Saving confirmed deployment outputs"):
                 _save_deployment_outputs(runner, config.environment_name, deployment_values)
                 persisted_values = runner.get_environment_values(config.environment_name)

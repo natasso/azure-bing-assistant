@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from azure_bing_assistant.config import InstallerConfig, KnowledgeMode
-from azure_bing_assistant.recovery import format_recovery, _ps
+from azure_bing_assistant.recovery import RECOVERY_MESSAGES, format_recovery, _ps
 
 
 STAGES = [
@@ -40,7 +40,7 @@ def test_all_phases_are_pure_and_do_not_print_secrets_or_delete_commands(monkeyp
     assert "SECRET" not in result and "PRIVATE" not in result
     assert "--reset-wizard" in result
     assert "Bing terms and final approval" in result
-    assert "no recovery commands were executed; nothing was cancelled, deleted or purged" in result
+    assert RECOVERY_MESSAGES[0] in result
     assert "az group delete" not in result and "az resource delete" not in result
     for command in result.splitlines():
         if command.startswith("az "):

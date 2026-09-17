@@ -9,7 +9,8 @@ from .config import InstallerConfig, KnowledgeMode
 from .installer_messages import InstallerMessages
 
 RECOVERY_MESSAGES = (
-    "Safe recovery: no recovery commands were executed; nothing was cancelled, deleted or purged.",
+    "Recovery report: no Azure resources were automatically restored, deleted or purged; "
+    "the diagnostic commands below were not executed.",
     "Validated interactive answers remain local defaults until --reset-wizard. "
     "Bing terms and final approval are always requested again; credentials and consent are not saved.",
     "Provisioning had not started in this attempt. No Azure resources were created by this attempt; "

@@ -1,5 +1,12 @@
 {
   "installer": {
+    "Automatically retry once with a fresh Foundry name when Azure confirms a deleted-account naming conflict (enabled by default).": "נסו שוב אוטומטית פעם אחת בלבד עם שם Foundry חדש כאשר Azure מאשר התנגשות בשם של חשבון שנמחק (מופעל כברירת מחדל).",
+    "If a deleted Foundry account blocks this installation, a new name generation will be saved and retried once. No existing account is restored, deleted or purged; sufficient quota is still required.": "אם חשבון Foundry שנמחק חוסם את ההתקנה הזו, יישמרו נתונים חדשים ליצירת השם ויתבצע ניסיון חוזר אחד בלבד. שום חשבון קיים אינו משוחזר, נמחק או מוסר לצמיתות; עדיין נדרשת מכסה מספקת.",
+    "Azure confirmed a deleted Foundry account name. Saving a fresh name generation and retrying infrastructure once; existing accounts remain untouched.": "Azure אישר שם של חשבון Foundry שנמחק. נשמרים נתונים חדשים ליצירת השם ומתבצע ניסיון חוזר אחד בלבד לפריסת התשתית; החשבונות הקיימים נשארים ללא שינוי.",
+    "Available capacity": "קיבולת זמינה",
+    "Azure deployment timestamp (UTC): {timestamp}": "חותמת הזמן של הפריסה ב-Azure (UTC): {timestamp}",
+    "Failure details were read automatically from this deployment's Azure operations.": "פרטי הכשל נקראו אוטומטית מתוך פעולות Azure של הפריסה הזו.",
+    "Additional failure details could not be verified for this attempt; the original error is preserved.": "לא ניתן היה לאמת פרטי כשל נוספים בניסיון הזה; השגיאה המקורית נשמרת.",
     "Create a new Foundry account name for a clean installation; preserve the saved name generation for normal retries.": "צרו שם חדש לחשבון Foundry לצורך התקנה נקייה; שמרו על נתוני יצירת השם השמורים לצורך ניסיונות חוזרים רגילים.",
     "A new Foundry account name will be generated after approval and saved for retries. Existing Foundry accounts are not deleted; web app and resource group names stay unchanged.": "לאחר האישור ייווצר שם חדש לחשבון Foundry ויישמר לניסיונות חוזרים. חשבונות Foundry קיימים אינם נמחקים; שמות יישום האינטרנט וקבוצת המשאבים נשארים ללא שינוי.",
     "FOUNDRY_NAME_SALT must be empty or 32 lowercase hexadecimal characters": "FOUNDRY_NAME_SALT חייב להיות ריק או להכיל 32 תווים הקסדצימליים באותיות קטנות",
@@ -18,7 +25,7 @@
     "Waiting for project access propagation ({elapsed}s elapsed, attempt {attempt}/40); domain restrictions remain enforced.": "ממתינים להחלת הרשאות הגישה לפרויקט (חלפו {elapsed} שניות, ניסיון {attempt}/40); הגבלות הדומיינים ממשיכות להיאכף.",
     "Foundry still denies configuration after the bounded access wait. Check project IAM and tenant policies, then resume deployment; no broader role or unfiltered agent was attempted.": "Foundry עדיין דוחה את ההגדרה לאחר זמן ההמתנה המוגבל לגישה. בדקו את IAM של הפרויקט ואת מדיניות הדייר, ואז המשיכו בפריסה; לא נעשה ניסיון להשתמש בתפקיד רחב יותר או בסוכן ללא סינון.",
     "Foundry configuration time budget expired; no further request was submitted.": "הזמן שהוקצב להגדרת Foundry הסתיים; לא נשלחה בקשה נוספת.",
-    "Safe recovery: no recovery commands were executed; nothing was cancelled, deleted or purged.": "התאוששות בטוחה: לא הופעלו פקודות התאוששות; דבר לא בוטל, נמחק או הוסר לצמיתות.",
+    "Recovery report: no Azure resources were automatically restored, deleted or purged; the diagnostic commands below were not executed.": "דוח התאוששות: לא בוצעו שחזור, מחיקה או הסרה לצמיתות של משאבי Azure באופן אוטומטי; פקודות האבחון שלהלן לא הופעלו.",
     "Validated interactive answers remain local defaults until --reset-wizard. Bing terms and final approval are always requested again; credentials and consent are not saved.": "התשובות האינטראקטיביות שאומתו נשארות ברירות מחדל מקומיות עד לשימוש ב--reset-wizard. קבלת התנאים של Bing והאישור הסופי תמיד מתבקשים מחדש; פרטי הכניסה וההסכמה אינם נשמרים.",
     "Provisioning had not started in this attempt. No Azure resources were created by this attempt; pre-existing resources are unchanged.": "הקצאת המשאבים טרם התחילה בניסיון הזה. הניסיון הזה לא יצר משאבי Azure; המשאבים שהיו קיימים קודם נותרו ללא שינוי.",
     "Default: keep the resources and diagnose the failure. Remote operations can continue after a local failure or interruption. Wait until they reach a terminal state before retrying.": "ברירת המחדל: שמרו על המשאבים ואבחנו את הכשל. פעולות מרוחקות עשויות להימשך לאחר כשל או הפסקה מקומיים. המתינו עד שיגיעו למצב סופי לפני שתנסו שוב.",

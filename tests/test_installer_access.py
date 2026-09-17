@@ -613,6 +613,7 @@ def test_real_cli_sdk_orchestration_repairs_403_without_changing_tools_and_close
     from azure.ai.projects import AIProjectClient
     from azure.core.credentials import AccessToken
     from azure_bing_assistant import cli
+    from azure_bing_assistant.recovery import RECOVERY_MESSAGES
     from test_web_policy import AgentTransport, JsonResponse
 
     events = []
@@ -695,4 +696,4 @@ def test_real_cli_sdk_orchestration_repairs_403_without_changing_tools_and_close
     for request in transport.requests:
         assert json.loads(request.body)["definition"]["tools"] == expected_tools
     if command == "install" and failure is not None:
-        assert "Safe recovery:" in captured.err
+        assert RECOVERY_MESSAGES[0] in captured.err

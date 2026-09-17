@@ -195,7 +195,7 @@ def test_dry_run_is_offline_without_uuid_or_files_and_reports_planned_rotation(i
     assert cli.main(ARGUMENTS + ["--dry-run"] + (["--new-foundry-account"] if rotate else [])) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["foundryAccountNaming"]["newGenerationAfterApproval"] is rotate
-    assert result["foundryAccountNaming"]["mayRequireAdditionalQuotaAndCost"] is rotate
+    assert result["foundryAccountNaming"]["mayRequireAdditionalQuotaAndCost"] is True
     assert result["foundryAccountNaming"]["deleteExistingAccounts"] is False
     assert SALT not in json.dumps(result)
     installation.factory.assert_not_called()

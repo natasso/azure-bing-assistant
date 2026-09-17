@@ -398,8 +398,11 @@ nuovamente, senza interromperlo per caricare l'aggiornamento.
 #### Errore di installazione e ripartenza pulita
 
 In caso di errore o Ctrl+C, `install` stampa un report localizzato su **stderr**.
-Il report è solo informativo: **non esegue diagnostica, annullamenti, eliminazioni,
-purge o nuovi tentativi**. Prima del provisioning, questo tentativo non ha creato
+I comandi diagnostici CLI mostrati **non vengono eseguiti**, ma dopo un errore ARM
+sono previste [letture API automatiche, verificate e limitate a 30 secondi](#capacita-e-avanzamento-it).
+Solo il caso soft-delete verificato descritto sotto può attivare un secondo
+provisioning, già dichiarato nel piano. Non ci sono eliminazioni, ripristini,
+purge o annullamenti automatici. Prima del provisioning, questo tentativo non ha creato
 risorse Azure; possono comunque esistere risorse di tentativi precedenti.
 
 - **Prima scelta: conservare le risorse**, `.azure` e lo stesso nome di installazione.
@@ -409,8 +412,10 @@ risorse Azure; possono comunque esistere risorse di tentativi precedenti.
   principale e di quella annidata Foundry. Non avviare un deployment concorrente.
 - Per quota/capacità, richiedere quota, ridurre la capacità o scegliere un
   modello/regione supportato: eliminare risorse non è una soluzione generale.
-- Per `FlagMustBeSetForRestore`/soft-delete, verificare e ripristinare l'account
-  recuperabile corrispondente quando appropriato. Nessun purge è automatico.
+- Per un `FlagMustBeSetForRestore` verificato e non ambiguo, il default è
+  [una sola nuova generazione Foundry](#recupero-foundry-auto-it), senza toccare
+  l'account recuperabile. Per riutilizzare invece l'account, disabilitare il
+  recupero automatico e chiedere un ripristino esplicitamente approvato.
 - Il 403 Foundry attiva la [correzione IAM condizionale](#accesso-foundry-installer-it).
   Se manca il permesso IAM, serve un amministratore; non ampliare i ruoli né
   rimuovere le restrizioni sui domini per aggirare un diniego.
@@ -459,6 +464,43 @@ di eliminazione.** Controllare e oscurare l'output prima di condividerlo.
 `install --reset-wizard` azzera solo le risposte locali, mai Azure; termini Bing e
 approvazione finale richiedono comunque un nuovo Sì.
 
+<a id="recupero-foundry-auto-it"></a>
+
+#### Account soft-deleted: una sola nuova generazione automatica
+
+`install` abilita **`--auto-new-foundry-account` per impostazione predefinita**.
+Il piano, prima del Sì finale, dichiara la possibilità di un secondo provisioning
+con nome Foundry nuovo. La selezione richiede tutte queste condizioni:
+
+1. Il tentativo è fallito e i dettagli verificati della sua distribuzione riportano
+   **`FlagMustBeSetForRestore` non ambiguo**.
+2. L'account indicato corrisponde alla sottoscrizione e al gruppo selezionati e al
+   prefisso dell'installazione. Dati concorrenti, non verificabili o negati non
+   autorizzano il retry; neppure quota, 404 generici o il solo errore esterno.
+3. Dopo l'approvazione già acquisita, l'installer genera e salva `FOUNDRY_NAME_SALT`
+   nell'ambiente azd selezionato **prima del secondo invio ARM**, poi riprova una
+   sola volta. Se anche questo tentativo fallisce, si ferma: nessun ciclo illimitato.
+
+Cambiano solo la generazione dell'account Foundry e i percorsi delle sue risorse
+figlie. Restano nome installazione, web app, gruppo, regione, modello, capacità
+e restrizioni sui domini approvati. L'account precedente non viene eliminato,
+ripristinato né sottoposto a purge: rimane recuperabile e può occupare quota.
+Eventuale pulizia di risorse attive o recuperabili richiede approvazione separata,
+verifica dell'uso esclusivo e backup; il purge non è la scelta predefinita.
+
+Per fermarsi all'errore senza creare automaticamente un altro account:
+
+```powershell
+python -m azure_bing_assistant install --no-auto-new-foundry-account --ui-language it
+```
+
+Il dry-run offline (`--non-interactive --dry-run` con gli argomenti richiesti)
+mostra solo l'intenzione: non genera né salva salt e non effettua letture o scritture
+Azure. I retry normali riusano la generazione già persistita e le risposte valide;
+conservare `.azure`. Il flag esplicito `--new-foundry-account` resta disponibile
+per una nuova generazione proattiva, anche per l'evitamento dei 404 dopo purge
+descritto sotto: non è necessario per il recupero soft-delete predefinito.
+
 <a id="nuovo-account-foundry-it"></a>
 
 #### Ricreazione Foundry: evitare il riuso del nome
@@ -489,7 +531,8 @@ python -m azure_bing_assistant install --new-foundry-account --ui-language it
   web app, gruppo, piano App Service, Search o Storage; non cambia regione né
   aggiunge capability host. Le scelte di modello/capacità restano quelle approvate.
 - **Nei retry omettere `--new-foundry-account`**: `install` riusa la generazione
-  salvata. Conservare l'ambiente `.azure` per aggiornamenti stabili.
+  salvata, salvo l'unico retry automatico per soft-delete verificato descritto sopra.
+  Conservare l'ambiente `.azure` per aggiornamenti stabili.
   `--reset-wizard` azzera le risposte, non questa generazione. Ripetere il flag
   significa chiedere deliberatamente un altro account, non riprendere il precedente.
 - Nessun account precedente viene eliminato o sottoposto a purge automaticamente.
@@ -613,10 +656,21 @@ e conservano la bozza. **Ctrl+C non annulla o elimina operazioni/risorse Azure**
 possono continuare; verificare prima di riprovare.
 
 Per stato ARM terminale Failed/Canceled, l'installer conserva solo codici
-ammessi e limitati, alcuni numeri quota riconoscibili e identificatori di
-deployment. Non stampa testo provider arbitrario, parametri, header, token,
-chiavi o URL con query. Il codice esterno `ResourceDeploymentFailure` **non prova
-la causa**: leggere i dettagli nelle operazioni indicate. Esempi generici:
+ammessi e limitati, numeri quota riconoscibili, timestamp UTC e identificatori di
+deployment. Per chiarire un errore esterno generico legge automaticamente, tramite
+**API ARM in sola lettura e con budget di 30 secondi**, le operazioni della
+distribuzione principale corrente e poi rilegge la principale. Accetta dettagli
+solo dopo aver verificato marker del tentativo, correlazione e timestamp: un
+deployment concorrente o precedente non diventa la diagnosi di quello corrente.
+Accesso negato, budget esaurito o verifica fallita mantengono **errore originale
+e avviso**, senza inventare una causa né autorizzare un retry.
+
+Quando riconosciuti, **utilizzo corrente**, **limite corrente**, **capacità disponibile**
+e capacità richiesta restano valori distinti con la propria etichetta; un valore
+disponibile non viene presentato come utilizzo o limite. Non vengono stampati testo
+provider arbitrario, parametri, header, credenziali, token, chiavi o URL con query.
+Il codice esterno `ResourceDeploymentFailure` da solo **non prova la causa**.
+Restano disponibili comandi manuali in sola lettura, per esempio:
 
 ```powershell
 az deployment operation sub list --subscription 'example-sub' --name 'chatbot-demo' --output json
@@ -625,6 +679,7 @@ az deployment operation group list --subscription 'example-sub' --resource-group
 
 I comandi effettivi usano la distribuzione corrente e, se identificato nella
 risposta già ricevuta, il deployment annidato; **non vengono eseguiti automaticamente**.
+Sono distinti dalle letture API ARM limitate descritte sopra.
 Output diagnostico manuale da controllare e oscurare prima di condividerlo.
 Timeout o stato mancante non diventano una diagnosi quota/conflitto.
 Il codice aggiornato si carica nel prossimo processo: lasciare terminare quello
@@ -632,9 +687,10 @@ in corso, senza interromperlo per aggiornare; con il checkout editable non occor
 reinstallare.
 
 Se le operazioni riportano `FlagMustBeSetForRestore`, il nome Foundry appartiene
-a un account eliminato ma recuperabile. Un amministratore deve verificare
-l'account eliminato e ripristinarlo esplicitamente se deve essere riutilizzato:
-non eliminare definitivamente risorse per aggirare l'errore.
+a un account eliminato ma recuperabile. Solo dettagli verificati e non ambigui
+possono attivare [il retry automatico con nuovo nome](#recupero-foundry-auto-it).
+Per riutilizzare invece l'account, disabilitare tale opzione e richiedere un
+ripristino esplicito a un amministratore; nessun purge è automatico.
 Gli errori di preflight compaiono nelle operazioni della distribuzione principale;
 un deployment annidato può ancora mostrare un tentativo precedente. Confrontare
 sempre le date.
@@ -1935,8 +1991,11 @@ do not interrupt it to load the update.
 #### Installation failure and clean restart
 
 On failure or Ctrl+C, `install` prints a localized report to **stderr**. The report
-is informational only: **no diagnostics, cancellations, deletions, purges or retries
-are executed**. Before provisioning, this attempt created no Azure resources;
+does **not execute its printed diagnostic CLI commands**, but ARM failures can
+trigger [verified, read-only API diagnostics with a 30-second budget](#capacity-and-progress-en).
+Only the verified soft-delete case below can trigger a second provisioning
+attempt, disclosed in the plan. Nothing is automatically deleted, restored,
+purged or cancelled. Before provisioning, this attempt created no Azure resources;
 resources from earlier attempts may still exist.
 
 - **First choice: keep the resources**, `.azure` and the same installation name.
@@ -1946,8 +2005,10 @@ resources from earlier attempts may still exist.
   deployment operations. Do not start a concurrent deployment.
 - For quota/capacity, request quota, reduce capacity or choose a supported
   model/region: deleting resources is not a general solution.
-- For `FlagMustBeSetForRestore`/soft-delete, inspect and restore the matching
-  recoverable account when appropriate. Purging is never automatic.
+- For verified, unambiguous `FlagMustBeSetForRestore`, the default is
+  [one fresh Foundry generation](#auto-foundry-recovery-en), leaving the recoverable
+  account untouched. To reuse that account instead, opt out of automatic recovery
+  and request an explicitly approved restore.
 - Foundry 403 triggers [conditional IAM repair](#installer-foundry-access-en).
   If IAM permission is missing, an administrator is needed; do not broaden roles
   or remove domain restrictions to work around a denial.
@@ -1995,6 +2056,43 @@ are not deletion lists.** Review/redact output before sharing it.
 `install --reset-wizard` resets only local answers, never Azure resources; Bing
 terms and final approval still require a fresh Yes.
 
+<a id="auto-foundry-recovery-en"></a>
+
+#### Soft-deleted account: one automatic fresh generation
+
+`install` enables **`--auto-new-foundry-account` by default**. Before the final
+Yes, the plan discloses that it may provision once more using a fresh Foundry name.
+This requires all of the following:
+
+1. The attempt failed and verified details from its deployment identify
+   **unambiguous `FlagMustBeSetForRestore`**.
+2. The reported account matches the selected subscription, resource group and
+   installation prefix. Concurrent, unverifiable or denied diagnostics do not
+   authorize a retry; neither do quota errors, generic 404s or the outer error alone.
+3. After the approval already obtained, the installer generates and saves
+   `FOUNDRY_NAME_SALT` in the selected azd environment **before the second ARM
+   submission**, then retries once. A second failure stops: there is no unbounded loop.
+
+Only the Foundry account generation and its child resource paths change. The
+approved installation name, web app, group, region, model, capacity and domain
+restrictions remain unchanged. The previous account is not deleted, restored
+or purged: it stays recoverable and may still hold quota. Cleaning up active or
+recoverable resources requires separate approval, verified exclusive ownership
+and backups; purging is not the default remedy.
+
+To stop at the error without automatically creating another account:
+
+```powershell
+python -m azure_bing_assistant install --no-auto-new-foundry-account --ui-language en
+```
+
+Offline dry-run (`--non-interactive --dry-run` with required arguments) displays
+intent only: it does not generate/save a salt or read/write Azure. Normal retries
+reuse the persisted generation and valid wizard answers; keep `.azure`.
+The explicit `--new-foundry-account` flag remains available for proactive fresh
+naming, including the post-purge 404 avoidance below; it is not needed for the
+default soft-delete recovery.
+
 <a id="new-foundry-account-en"></a>
 
 #### Recreating Foundry: avoid reusing the account name
@@ -2025,7 +2123,8 @@ python -m azure_bing_assistant install --new-foundry-account --ui-language en
   group, App Service plan, Search or Storage; it does not change region or add
   capability hosts. Model/capacity choices remain those approved.
 - **Omit `--new-foundry-account` on retries**: `install` reuses the saved generation.
-  Keep the `.azure` environment for stable updates. `--reset-wizard` resets answers,
+  The one-time verified soft-delete retry above is the exception. Keep the `.azure`
+  environment for stable updates. `--reset-wizard` resets answers,
   not this generation. Repeating the flag deliberately requests another account,
   rather than resuming the previous one.
 - Old accounts are never deleted or purged automatically. If still active, they
@@ -2145,11 +2244,22 @@ Phases end only when their operations return; failures/Ctrl+C stop the display
 and retain the draft. **Ctrl+C does not cancel/delete Azure operations/resources**:
 they may continue; check before retrying.
 
-On terminal ARM Failed/Canceled, only bounded accepted codes, a few recognized
-quota numbers and deployment identifiers are retained. Arbitrary provider prose,
-parameters, headers, tokens, keys or URLs with queries are not printed.
-An outer `ResourceDeploymentFailure` **does not establish the cause**: read
-the indicated deployment operation details. Generic examples:
+On terminal ARM Failed/Canceled, only bounded accepted codes, recognized quota
+numbers, UTC timestamps and deployment identifiers are retained. To clarify a
+generic outer error, the installer automatically reads current parent deployment
+operations and rereads the parent using **read-only ARM APIs with a 30-second
+budget**. Details are accepted only after checking the attempt marker, correlation
+and timestamps: concurrent or older deployments must not become the current
+attempt's diagnosis. Denied access, budget exhaustion or failed verification
+preserves **the original error plus a warning**, without inventing a cause or
+authorizing a retry.
+
+When recognized, **current usage**, **current limit**, **available capacity** and
+required capacity retain their distinct labels; an available value is not reported
+as usage or limit. Arbitrary provider prose, parameters, headers, credentials,
+tokens, keys or URLs with queries are not printed. An outer
+`ResourceDeploymentFailure` alone **does not establish the cause**.
+Manual read-only commands remain available, for example:
 
 ```powershell
 az deployment operation sub list --subscription 'example-sub' --name 'chatbot-demo' --output json
@@ -2158,15 +2268,17 @@ az deployment operation group list --subscription 'example-sub' --resource-group
 
 Actual commands target the current deployment and any nested deployment
 identified in the response already received; **they are never run automatically**.
+These are separate from the bounded ARM API reads described above.
 Review/redact manual diagnostic output before sharing it. Missing state or
 timeout is not reinterpreted as a quota/conflict diagnosis.
 Updated code loads in the next process: let the current process finish rather
 than interrupting it to update. No reinstall is needed for the editable checkout.
 
 If operations report `FlagMustBeSetForRestore`, the Foundry name belongs to a
-soft-deleted, recoverable account. An administrator must inspect the deleted
-account and explicitly recover it if it should be reused; do not purge resources
-to work around the error. Preflight errors appear in the parent deployment's
+soft-deleted, recoverable account. Only verified, unambiguous details can trigger
+[the automatic fresh-name retry](#auto-foundry-recovery-en). To reuse the account
+instead, opt out and request an explicit administrator restore; purging is never
+automatic. Preflight errors appear in the parent deployment's
 operations, while a nested deployment may still show an earlier attempt.
 Always compare timestamps.
 
